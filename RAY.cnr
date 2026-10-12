@@ -1,0 +1,109 @@
+//Cada braço definido aqui, o corpo da AÇÃO.
+// Agora cada braço tem um PAPEL (especialização) em vez de todos serem iguais:
+//   0 executor    - as "mãos": lê, escreve, consulta, gera o texto (ferramentas 0-4, 6 e 13)
+//   1 revisor     - confere o que os outros braços produzem; pode PARAR a resposta,
+//                   apontar o erro e dar PONTOS NEGATIVOS ao braço culpado (ferramenta 9)
+//   2 arquivista  - cuida do contexto/memória: grava lições, compacta, lista skills (7, 8, 12)
+//   3 ferreiro    - cria SKILLS novas a partir dos erros e padrões (ferramenta 10)
+//   4 planejador  - quebra um objetivo grande em um roteiro (ferramenta 11)
+// O anel começa com 5 braços [executor, executor, revisor, arquivista, ferreiro]
+// e GANHA braços novos (planejador, 2º revisor, mais executores) ao evoluir.
+Sector Define{
+    var tR = 5;                          // ticks até o braço morto ser substituído por um novo
+    var[] roleInit = {0,0,1,2,3};        // papéis do anel inicial (a "larva")
+
+    Struct Ray{
+        var CurrentWork;
+        var Worklist[];      // ferramentas que este braço sabe operar (definidas pelo papel)
+        var memory[];        // pesos aprendidos (memory[k] <-> Worklist[k])
+        var alive;           // 1 is alive; 0 is dead;
+        var timeRemaing;     // ticks restantes até o substituto nascer
+        var singularities[]; // 0 = boldness (exploração), 1 = retreat (sensibilidade a sinal negativo), 2 = plasticity (velocidade de aprendizado)
+        var pain;            // sinal negativo acumulado (decai a cada sucesso)
+        var generation;      // quantas vezes este "slot" do anel já foi substituído
+        var successes;
+        var failures;
+        var role;            // papel do braço (ver tabela acima)
+        var load;            // carga recente (distribuição: braço muito usado é poupado)
+        var strikes;         // pontos negativos recebidos em toda a vida do braço
+        var credits;         // pontos positivos recebidos de revisores
+        var briefing;        // contexto gerado para este braço (lições do erro que o fez renascer)
+        Ray(var cW, var wL, var m, var tR2, var s, var rl){
+            CurrentWork = cW;
+            Worklist = wL.clone();
+            memory = m.clone();
+            alive = 1;
+            timeRemaing = tR2;
+            pain = 0;
+            generation = 0;
+            successes = 0;
+            failures = 0;
+            role = rl;
+            load = 0;
+            strikes = 0;
+            credits = 0;
+            briefing = "";
+            singularities.push(s[0]*random(0,2) + 0.34);
+            singularities.push(s[1]*random(0,2) + 0.34);
+            singularities.push(s[2]*random(0,2) + 0.34);
+        }
+    }
+
+    // ferramentas por papel
+    function RoleTools(var rl){
+        var t[] = {0,1,2,3,4,6,13};
+        if (rl == 1){ var t1[] = {9}; return t1; }
+        if (rl == 2){ var t2[] = {7,8,12}; return t2; }
+        if (rl == 3){ var t3[] = {10}; return t3; }
+        if (rl == 4){ var t4[] = {11}; return t4; }
+        return t;
+    }
+
+    function RoleName(var rl){
+        if (rl == 0){ return "executor"; }
+        if (rl == 1){ return "revisor"; }
+        if (rl == 2){ return "arquivista"; }
+        if (rl == 3){ return "ferreiro"; }
+        if (rl == 4){ return "planejador"; }
+        return "?";
+    }
+
+    function RoleLetter(var rl){
+        if (rl == 0){ return "E"; }
+        if (rl == 1){ return "V"; }
+        if (rl == 2){ return "A"; }
+        if (rl == 3){ return "F"; }
+        if (rl == 4){ return "P"; }
+        return "?";
+    }
+
+    // cria um braço com a Worklist do seu papel e memória neutra (0.5 por ferramenta)
+    function CreateRay(var rl){
+        var wl = RoleTools(rl);
+        var[] mm;
+        for(var q = 0; q < len(wl); q++){
+            mm.push(0.5);
+        }
+        var[] s = {random(0,3),random(0,3),random(0,3)};
+        var i = Ray(-1, wl, mm, tR, s, rl);
+        return i;
+    }
+
+    function getTime(var x){
+        var i = x.timeRemaing;
+        return i;
+    }
+
+    var[] pR;
+    for(var i = 0; i < len(roleInit); i++){
+        pR.push(CreateRay(roleInit[i]));
+    }
+}
+
+Bundle Radii{
+    Shard(pR) PentaRadii;
+    CreateRay();
+    RoleTools();
+    RoleName();
+    RoleLetter();
+}

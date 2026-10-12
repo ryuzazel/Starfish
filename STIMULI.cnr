@@ -1,0 +1,370 @@
+// INDICADORES — verificações SEM IA (determinísticas) sobre o que os braços escrevem.
+// Um modelo pequeno revisando a si mesmo deixa passar erro, mas um contador não se engana.
+// Cada indicador mede algo objetivo; se passar do limite, a parte é reprovada ANTES de gastar
+// uma chamada ao revisor-modelo. Usado em toda parte de `gen:` e em toda resposta de `ask:`.
+//
+//  repeticao      frases longas (50+ bytes) que já apareciam no texto (ou antes, na própria parte)
+//  laco           mesma sequência de 4 palavras repetida 6+ vezes (10%+ do texto) ou 10+ vezes (loop)
+//  diversidade    razão palavras únicas / total muito baixa (texto "arrastado")
+//  linhas-iguais  3+ linhas idênticas seguidas
+//  marcador       vazou raciocínio/prompt: <think>, [GERADOR], VEREDITO:, OBJETIVO:, ...
+//  alfabeto       caracteres chineses/cirílicos num pedido em português
+//  desvio         a primeira parte não menciona nada do que foi pedido
+//  codigo         bloco de código fechado com (), {}, [] desbalanceados, ou "T x = x(...)"
+//  curta          parte quase vazia
+//
+// indCheck devolve {ok, gravidade, codigo, descricao, correcao, metricas}
+
+Gather(Bundle MADREPORITO){}
+
+// frases (>= 50 bytes) de um texto, minúsculas, para achar repetição
+function indSentences(var text){
+    var[] out;
+    var lines = MADREPORITO.madSplit(MADREPORITO.madLower(text), 10);
+    for(var i = 0; i < len(lines); i++){
+        var parts = MADREPORITO.madSplit(lines[i], 46);
+        for(var j = 0; j < len(parts); j++){
+            var t = MADREPORITO.madTrim(parts[j]);
+            if (len(stringToChars(t)) >= 50){
+                out.push(t);
+            }
+        }
+    }
+    return out;
+}
+
+// {repetidas, total, maior trecho repetido}
+function indRepeatInfo(var part, var prior){
+    var res[] = {0, 0, ""};
+    var before = indSentences(MADREPORITO.madTail(prior, 20000));
+    var now = indSentences(part);
+    var hits = 0;
+    var longest = 0;
+    var first = "";
+    for(var i = 0; i < len(now); i++){
+        var dup = 0;
+        for(var b = 0; b < len(before) && dup == 0; b++){
+            if (before[b] == now[i]){
+                dup = 1;
+            }
+        }
+        for(var k = 0; k < i && dup == 0; k++){
+            if (now[k] == now[i]){
+                dup = 1;
+            }
+        }
+        if (dup == 1){
+            hits = hits + 1;
+            var sz = len(stringToChars(now[i]));
+            if (sz > longest){
+                longest = sz;
+                first = now[i];
+            }
+        }
+    }
+    res[0] = hits;
+    res[1] = len(now);
+    res[2] = MADREPORITO.madShort(first, 100);
+    return res;
+}
+
+// palavras do texto (minúsculas, letras/dígitos/acentos), no máximo n
+function indTokens(var text, var n){
+    var codes = stringToChars(MADREPORITO.madLower(text));
+    var[] words;
+    var[] cur;
+    for(var i = 0; i <= len(codes) && len(words) < n; i++){
+        var c = 0;
+        if (i < len(codes)){ c = codes[i]; }
+        var isW = 0;
+        if (c >= 97 && c <= 122){ isW = 1; }
+        if (c >= 48 && c <= 57){ isW = 1; }
+        if (c >= 128){ isW = 1; }
+        if (isW == 1){
+            cur.push(c);
+        } else {
+            if (len(cur) > 0){
+                words.push(charsToString(cur));
+                while(len(cur) > 0){
+                    cur.pop();
+                }
+            }
+        }
+    }
+    return words;
+}
+
+// maior número de vezes que uma mesma sequência de 4 palavras aparece
+function indLoopMax(var words){
+    var n = len(words);
+    if (n < 12){
+        return 1;
+    }
+    var[] keys;
+    for(var i = 0; i + 3 < n; i++){
+        keys.push(words[i] + " " + words[i + 1] + " " + words[i + 2] + " " + words[i + 3]);
+    }
+    var best = 1;
+    for(var a = 0; a < len(keys); a++){
+        var cnt = 1;
+        for(var b = a + 1; b < len(keys); b++){
+            if (keys[b] == keys[a]){
+                cnt = cnt + 1;
+            }
+        }
+        if (cnt > best){
+            best = cnt;
+        }
+    }
+    return best;
+}
+
+// palavras únicas / total (0..1)
+function indDiversity(var words){
+    var n = len(words);
+    if (n == 0){
+        return 1;
+    }
+    var[] seen;
+    for(var i = 0; i < n; i++){
+        var found = 0;
+        for(var j = 0; j < len(seen) && found == 0; j++){
+            if (seen[j] == words[i]){
+                found = 1;
+            }
+        }
+        if (found == 0){
+            seen.push(words[i]);
+        }
+    }
+    return len(seen) / n;
+}
+
+// 1 se houver 3+ linhas idênticas e não vazias seguidas
+function indSameLines(var text){
+    var lines = MADREPORITO.madSplit(text, 10);
+    var run = 1;
+    for(var i = 1; i < len(lines); i++){
+        var a = MADREPORITO.madTrim(lines[i]);
+        if (a != "" && len(stringToChars(a)) >= 3 && a == MADREPORITO.madTrim(lines[i - 1])){
+            run = run + 1;
+            if (run >= 3){
+                return 1;
+            }
+        } else {
+            run = 1;
+        }
+    }
+    return 0;
+}
+
+// caracteres chineses/japoneses (E3..E9) ou cirílicos (D0, D1) por bytes líderes
+function indForeignChars(var text){
+    var c = stringToChars(text);
+    var n = 0;
+    for(var i = 0; i < len(c); i++){
+        if ((c[i] >= 227 && c[i] <= 233) || c[i] == 208 || c[i] == 209){
+            n = n + 1;
+        }
+    }
+    return n;
+}
+
+// primeiro marcador de prompt/raciocínio que vazou para o texto ("" se nenhum)
+function indLeak(var text){
+    var low = MADREPORITO.madLower(text);
+    var marks[] = {"<think>", "[gerador]", "[revisor]", "[planejador]", "[ferreiro]", "[arquivista]", "veredito:", "correcao obrigatoria", "texto ja escrito", "objetivo:"};
+    for(var i = 0; i < len(marks); i++){
+        if (MADREPORITO.madIndexOf(low, marks[i], 0) >= 0){
+            return marks[i];
+        }
+    }
+    return "";
+}
+
+// blocos de código completos (``` ... ```) dentro do texto, como lista de strings
+function indCodeBlocks(var text){
+    var[] blocks;
+    var pos = 0;
+    var go = 1;
+    while(go == 1){
+        var a = MADREPORITO.madIndexOf(text, "```", pos);
+        if (a == -1){
+            go = 0;
+        } else {
+            var b = MADREPORITO.madIndexOf(text, "```", a + 3);
+            if (b == -1){
+                go = 0;
+            } else {
+                blocks.push(MADREPORITO.madSub(text, a + 3, b));
+                pos = b + 3;
+            }
+        }
+    }
+    return blocks;
+}
+
+// confere um bloco de código: devolve "" se ok, ou a descrição do problema.
+// Ignora comentários // e conteúdo de strings "..." e '...'.
+function indCodeProblem(var code){
+    var lines = MADREPORITO.madSplit(code, 10);
+    var par = 0;
+    var bra = 0;
+    var sqr = 0;
+    for(var i = 0; i < len(lines); i++){
+        var c = stringToChars(lines[i]);
+        var inStr = 0;
+        var q = 0;
+        var stop = 0;
+        for(var j = 0; j < len(c) && stop == 0; j++){
+            var ch = c[j];
+            if (inStr == 1){
+                if (ch == q){
+                    inStr = 0;
+                }
+            } else {
+                if (ch == 47 && j + 1 < len(c) && c[j + 1] == 47){
+                    stop = 1;
+                } else {
+                    if (ch == 34 || ch == 39){
+                        inStr = 1;
+                        q = ch;
+                    }
+                    if (ch == 40){ par = par + 1; }
+                    if (ch == 41){ par = par - 1; }
+                    if (ch == 123){ bra = bra + 1; }
+                    if (ch == 125){ bra = bra - 1; }
+                    if (ch == 91){ sqr = sqr + 1; }
+                    if (ch == 93){ sqr = sqr - 1; }
+                }
+            }
+        }
+        if (par < 0 || bra < 0 || sqr < 0){
+            return "delimitador fechado sem abrir na linha " + (i + 1) + " do bloco de codigo";
+        }
+        // "T nome = nome(...)": a variavel se usa como funcao na propria declaracao
+        var eq = MADREPORITO.madIndexOf(lines[i], " = ", 0);
+        if (eq > 0){
+            var left = MADREPORITO.madTrim(MADREPORITO.madSub(lines[i], 0, eq));
+            var right = MADREPORITO.madTrim(MADREPORITO.madSub(lines[i], eq + 3, len(c)));
+            var lw = indTokens(left, 4);
+            if (len(lw) >= 2){
+                var nm = lw[len(lw) - 1];
+                if (MADREPORITO.madStarts(MADREPORITO.madLower(right), nm + "(") == 1){
+                    return "declaracao '" + nm + "' chama a si mesma como funcao (linha " + (i + 1) + " do bloco de codigo)";
+                }
+            }
+        }
+    }
+    if (par != 0 || bra != 0 || sqr != 0){
+        return "delimitadores desbalanceados no bloco de codigo: ( ) = " + par + ", { } = " + bra + ", [ ] = " + sqr;
+    }
+    return "";
+}
+
+// quantas palavras do pedido aparecem no texto, comparando só os 5 primeiros bytes
+// (vascular/vasculares, regenera/regeneração casam)
+function indTopicHits(var goalWords, var text){
+    var low = MADREPORITO.madLower(text);
+    var hits = 0;
+    for(var i = 0; i < len(goalWords); i++){
+        if (MADREPORITO.madIndexOf(low, MADREPORITO.madHead(goalWords[i], 5), 0) >= 0){
+            hits = hits + 1;
+        }
+    }
+    return hits;
+}
+
+// verifica uma parte. text = a parte; prior = texto anterior ("" na 1ª parte); goal = o pedido.
+// Devolve {ok(1/0), gravidade, codigo, descricao, correcao, metricas}
+function indCheck(var part, var prior, var goal){
+    var res[] = {1, 0, "", "", "", ""};
+    var words = indTokens(part, 700);
+    var nw = len(words);
+    var div = indDiversity(words);
+    var loop = indLoopMax(words);
+    var rep = indRepeatInfo(part, prior);
+    res[5] = "palavras " + nw + ", diversidade " + floor(div * 100) / 100 + ", maior laco " + loop + "x, frases repetidas " + rep[0] + "/" + rep[1];
+
+    // 1) marcador vazado
+    var leak = indLeak(part);
+    if (leak != "" && MADREPORITO.madIndexOf(MADREPORITO.madLower(goal), leak, 0) == -1){
+        res[0] = 0; res[1] = 2; res[2] = "marcador";
+        res[3] = "o texto contem '" + leak + "' (raciocinio ou prompt vazou para a resposta)";
+        res[4] = "escreva apenas o texto final da resposta, sem repetir instrucoes nem raciocinio";
+        return res;
+    }
+    // 2) alfabeto inesperado
+    var foreign = indForeignChars(part);
+    if (foreign >= 10 && indForeignChars(goal) == 0){
+        res[0] = 0; res[1] = 2; res[2] = "alfabeto";
+        res[3] = "o texto tem " + foreign + " caracteres de outro alfabeto (chines/cirilico) num pedido em portugues";
+        res[4] = "escreva somente em portugues";
+        return res;
+    }
+    // 3) repetição de frases
+    if (rep[0] >= 2 || (rep[0] == 1 && len(stringToChars(rep[2])) >= 100)){
+        res[0] = 0; res[1] = 2; res[2] = "repeticao";
+        res[3] = "repete frases ja escritas (" + rep[0] + " de " + rep[1] + "): '" + rep[2] + "'";
+        res[4] = "nao repita; avance para um ponto novo com informacao nova, ou termine com [FIM] se o assunto acabou";
+        return res;
+    }
+    // 4) laço de palavras
+    // 6+ repeticoes E pelo menos 10% do texto nelas (ou 10+ repeticoes): termo tecnico que volta
+    // algumas vezes nao conta como loop
+    if (nw >= 40 && (loop >= 10 || (loop >= 6 && loop * 4 * 10 >= nw))){
+        res[0] = 0; res[1] = 2; res[2] = "laco";
+        res[3] = "a mesma sequencia de palavras se repete " + loop + " vezes (o texto entrou em loop)";
+        res[4] = "varie o conteudo; escreva informacao nova em vez de repetir a mesma expressao";
+        return res;
+    }
+    // 5) linhas idênticas
+    if (indSameLines(part) == 1){
+        res[0] = 0; res[1] = 1; res[2] = "linhas-iguais";
+        res[3] = "tem 3 ou mais linhas identicas seguidas";
+        res[4] = "remova as linhas repetidas";
+        return res;
+    }
+    // 6) diversidade lexical
+    if (nw >= 150 && div < 0.22){
+        res[0] = 0; res[1] = 1; res[2] = "diversidade";
+        res[3] = "vocabulario pobre demais (" + floor(div * 100) + "% de palavras unicas em " + nw + " palavras): texto arrastado";
+        res[4] = "seja mais objetivo e acrescente informacao nova em cada frase";
+        return res;
+    }
+    // 7) desvio do assunto (só na 1ª parte)
+    if (prior == "" && nw >= 20){
+        var gw = MADREPORITO.madWords(goal, 12);
+        if (len(gw) >= 3 && indTopicHits(gw, part) == 0){
+            res[0] = 0; res[1] = 2; res[2] = "desvio";
+            res[3] = "a parte nao menciona nada do que foi pedido";
+            res[4] = "responda ao pedido, falando do assunto pedido";
+            return res;
+        }
+    }
+    // 8) código: blocos fechados desta parte (olhando o texto junto para pegar blocos que fecharam agora)
+    var all = prior + "\n" + part;
+    var blocks = indCodeBlocks(all);
+    var before = indCodeBlocks(prior);
+    for(var k = len(before); k < len(blocks); k++){
+        var prob = indCodeProblem(blocks[k]);
+        if (prob != ""){
+            res[0] = 0; res[1] = 2; res[2] = "codigo";
+            res[3] = prob;
+            res[4] = "corrija o codigo: confira parenteses e chaves e nao use um nome de variavel como funcao";
+            return res;
+        }
+    }
+    // 9) parte quase vazia (a marca [FIM] sozinha é válida)
+    if (len(stringToChars(MADREPORITO.madTrim(part))) < 30 && MADREPORITO.madHas(part, "[FIM]") == 0){
+        res[0] = 0; res[1] = 2; res[2] = "curta";
+        res[3] = "a parte veio praticamente vazia";
+        res[4] = "escreva o texto da parte pedida";
+        return res;
+    }
+    return res;
+}
+
+Bundle INDICADORES{
+    indCheck();
+}

@@ -1,0 +1,197 @@
+// CONTEXTO — a memória de longo prazo do Starfish (lições aprendidas).
+// Toda vez que um braço Revisor pega um erro, o ARQUIVISTA grava aqui uma lição
+// ("o que deu errado -> como corrigir"). As lições relevantes são injetadas no prompt das
+// próximas respostas (por isso o contexto "cresce" com o uso) e, quando passam do orçamento do
+// nível atual, o Arquivista as compacta. Persistido em starfish_workspace/context.txt.
+// Este módulo só guarda e busca; quem chama o modelo (compactar etc.) é o ACC, via braços.
+
+Gather(Bundle MADREPORITO){}
+Gather(Bundle INTERRADII){}
+
+var[] ctxLessons;
+var ctxLoaded = 0;
+var ctxMaxLine = 600;     // tamanho máximo de uma lição (bytes)
+
+function ctxPath(){
+    return INTERRADII.interPath("context.txt");
+}
+
+function ctxClear(){
+    while(len(ctxLessons) > 0){
+        ctxLessons.pop();
+    }
+}
+
+function ctxInit(){
+    ctxClear();
+    var p = ctxPath();
+    if (fileExists(p)){
+        var lines = MADREPORITO.madSplit((string)readFile(p), 10);
+        for(var i = 0; i < len(lines); i++){
+            var l = MADREPORITO.madTrim(lines[i]);
+            if (l != ""){
+                ctxLessons.push(l);
+            }
+        }
+    }
+    ctxLoaded = 1;
+    return len(ctxLessons);
+}
+
+function ctxCount(){
+    return len(ctxLessons);
+}
+
+// total de bytes das lições (aprox. do que ocupam no prompt)
+function ctxSize(){
+    var n = 0;
+    for(var i = 0; i < len(ctxLessons); i++){
+        n = n + len(stringToChars(ctxLessons[i])) + 1;
+    }
+    return n;
+}
+
+function ctxSave(){
+    var s = "";
+    for(var i = 0; i < len(ctxLessons); i++){
+        s = s + ctxLessons[i] + "\n";
+    }
+    writeFile(ctxPath(), s);
+}
+
+// grava uma lição (uma linha). Devolve 1 se entrou, 0 se vazia/duplicada.
+function ctxAdd(var lesson){
+    var l = MADREPORITO.madShort(MADREPORITO.madOneLine(lesson), ctxMaxLine);
+    if (l == ""){
+        return 0;
+    }
+    for(var i = 0; i < len(ctxLessons); i++){
+        if (ctxLessons[i] == l){
+            return 0;
+        }
+    }
+    ctxLessons.push(l);
+    appendFile(ctxPath(), l + "\n");
+    return 1;
+}
+
+// as lições mais úteis para `goal` dentro de `budget` bytes.
+// Relevância = palavras em comum com o objetivo (x10) + recência (até 3) + regras manuais (+5).
+function ctxRecall(var budget, var goal){
+    var n = len(ctxLessons);
+    if (n == 0){
+        return "";
+    }
+    var words = MADREPORITO.madWords(goal, 24);
+    var[] score;
+    var[] taken;
+    for(var i = 0; i < n; i++){
+        var sc = MADREPORITO.madOverlap(words, ctxLessons[i]) * 10;
+        sc = sc + 3 * (i + 1) / n;
+        if (MADREPORITO.madStarts(ctxLessons[i], "[manual]") == 1){
+            sc = sc + 5;
+        }
+        score.push(sc);
+        taken.push(0);
+    }
+    var out = "";
+    var used = 0;
+    var go = 1;
+    while(go == 1){
+        var best = -1;
+        var bestS = -1;
+        for(var j = 0; j < n; j++){
+            if (taken[j] == 0 && score[j] > bestS){
+                bestS = score[j];
+                best = j;
+            }
+        }
+        if (best == -1){
+            go = 0;
+        } else {
+            taken[best] = 1;
+            var line = "- " + ctxLessons[best] + "\n";
+            var size = len(stringToChars(line));
+            if (used + size > budget){
+                go = 0;
+            } else {
+                out = out + line;
+                used = used + size;
+            }
+        }
+    }
+    return out;
+}
+
+// as últimas `maxLines` lições, numeradas (para o usuário ler)
+function ctxDump(var maxLines){
+    var n = len(ctxLessons);
+    if (n == 0){
+        return "(sem licoes ainda)";
+    }
+    var from = n - maxLines;
+    if (from < 0){ from = 0; }
+    var s = "";
+    for(var i = from; i < n; i++){
+        s = s + (i + 1) + ". " + ctxLessons[i] + "\n";
+    }
+    return s;
+}
+
+// todas as lições em texto (entrada da compactação)
+function ctxAll(){
+    var s = "";
+    for(var i = 0; i < len(ctxLessons); i++){
+        s = s + ctxLessons[i] + "\n";
+    }
+    return s;
+}
+
+// as últimas n lições em texto (material do Ferreiro)
+function ctxLast(var n){
+    var from = len(ctxLessons) - n;
+    if (from < 0){ from = 0; }
+    var s = "";
+    for(var i = from; i < len(ctxLessons); i++){
+        s = s + "- " + ctxLessons[i] + "\n";
+    }
+    return s;
+}
+
+// troca todas as lições pelo texto compactado (uma lição por linha). Devolve quantas ficaram;
+// se o texto vier vazio, não mexe em nada (nunca perde memória por resposta ruim do modelo).
+function ctxReplaceAll(var text){
+    var lines = MADREPORITO.madSplit(text, 10);
+    var[] fresh;
+    for(var i = 0; i < len(lines); i++){
+        var l = MADREPORITO.madTrim(lines[i]);
+        if (MADREPORITO.madStarts(l, "- ") == 1 || MADREPORITO.madStarts(l, "* ") == 1){
+            l = MADREPORITO.madTrim(MADREPORITO.madTrimFrom(l, 1));
+        }
+        l = MADREPORITO.madShort(MADREPORITO.madOneLine(l), ctxMaxLine);
+        if (l != ""){
+            fresh.push(l);
+        }
+    }
+    if (len(fresh) == 0){
+        return 0;
+    }
+    ctxClear();
+    for(var k = 0; k < len(fresh); k++){
+        ctxLessons.push(fresh[k]);
+    }
+    ctxSave();
+    return len(ctxLessons);
+}
+
+Bundle CONTEXTO{
+    ctxInit();
+    ctxCount();
+    ctxSize();
+    ctxAdd();
+    ctxRecall();
+    ctxDump();
+    ctxAll();
+    ctxLast();
+    ctxReplaceAll();
+}

@@ -1,0 +1,233 @@
+// DESENVOLVIMENTO — como a estrela do mar CRESCE.
+// O Starfish ganha XP quando trabalha bem (tarefa concluída, parte aprovada pelo Revisor,
+// erro corrigido, skill criada, contexto compactado) e sobe de nível:
+//
+//   nível  fase      XP    braços  tokens/parte  partes  passos agente  contexto injetado
+//     1    larva       0      5        1024          4         4        pequeno
+//     2    juvenil    12      6        1536          6         6        ...
+//     3    jovem      40      7        2048          8         8        ...
+//     4    adulta    100      8        3072         10        10        ...
+//     5    anciã     220      9        4096         12        12        grande
+//
+// Os orçamentos de texto (contexto injetado, cauda do texto, histórico do agente) são frações
+// da janela de contexto do modelo (ambCtxTokens em AMBULACRO.cnr), então NUNCA estouram o -c
+// do llama-server. O estado fica em starfish_workspace/estado.txt (sobrevive a reinícios).
+
+Gather(Bundle INTERRADII){}
+
+var devXp = 0;
+var devLvl = 1;
+
+function devPath(){
+    return INTERRADII.interPath("estado.txt");
+}
+
+function devLevelFor(var xp){
+    if (xp >= 220){ return 5; }
+    if (xp >= 100){ return 4; }
+    if (xp >= 40){ return 3; }
+    if (xp >= 12){ return 2; }
+    return 1;
+}
+
+function devSave(){
+    writeFile(devPath(), "xp=" + devXp + "\n");
+}
+
+function devInit(){
+    devXp = 0;
+    var p = devPath();
+    if (fileExists(p)){
+        var t = (string)readFile(p);
+        var at = -1;
+        var codes = stringToChars(t);
+        // procura "xp=" e lê os dígitos
+        for(var i = 0; i + 2 < len(codes) && at == -1; i++){
+            if (codes[i] == 120 && codes[i + 1] == 112 && codes[i + 2] == 61){
+                at = i + 3;
+            }
+        }
+        if (at != -1){
+            var n = 0;
+            while(at < len(codes) && codes[at] >= 48 && codes[at] <= 57){
+                n = n * 10 + (codes[at] - 48);
+                at = at + 1;
+            }
+            devXp = n;
+        }
+    }
+    devLvl = devLevelFor(devXp);
+    return devLvl;
+}
+
+function devXpNow(){
+    return devXp;
+}
+
+function devLevel(){
+    return devLvl;
+}
+
+// XP necessário para o próximo nível (-1 no último)
+function devNextXp(){
+    if (devLvl == 1){ return 12; }
+    if (devLvl == 2){ return 40; }
+    if (devLvl == 3){ return 100; }
+    if (devLvl == 4){ return 220; }
+    return -1;
+}
+
+function devStage(){
+    if (devLvl == 1){ return "larva"; }
+    if (devLvl == 2){ return "juvenil"; }
+    if (devLvl == 3){ return "jovem"; }
+    if (devLvl == 4){ return "adulta"; }
+    return "ancia";
+}
+
+// ganha XP; devolve o NOVO nível se subiu, 0 se não
+function devGain(var n){
+    var old = devLvl;
+    devXp = devXp + n;
+    devLvl = devLevelFor(devXp);
+    devSave();
+    if (devLvl > old){
+        return devLvl;
+    }
+    return 0;
+}
+
+// quantos braços de cada papel o anel deve ter neste nível (0 executor, 1 revisor,
+// 2 arquivista, 3 ferreiro, 4 planejador)
+function devTarget(var rl){
+    if (rl == 0){
+        if (devLvl >= 4){ return 3; }
+        return 2;
+    }
+    if (rl == 1){
+        if (devLvl >= 3){ return 2; }
+        return 1;
+    }
+    if (rl == 2){
+        if (devLvl >= 5){ return 2; }
+        return 1;
+    }
+    if (rl == 3){
+        return 1;
+    }
+    if (rl == 4){
+        if (devLvl >= 2){ return 1; }
+        return 0;
+    }
+    return 0;
+}
+
+function devMaxArms(){
+    var n = 0;
+    for(var r = 0; r < 5; r++){
+        n = n + devTarget(r);
+    }
+    return n;
+}
+
+function devByLevel(var a, var b, var c, var d, var e){
+    if (devLvl == 1){ return a; }
+    if (devLvl == 2){ return b; }
+    if (devLvl == 3){ return c; }
+    if (devLvl == 4){ return d; }
+    return e;
+}
+
+// tokens de uma parte de resposta (nunca mais que 1/4 da janela de contexto)
+function devSegTokens(var ctxTokens){
+    var t = devByLevel(1024, 1536, 2048, 3072, 4096);
+    var cap = ctxTokens / 4;
+    if (t > cap){ t = cap; }
+    return floor(t);
+}
+
+function devMaxSegs(){
+    return devByLevel(4, 6, 8, 10, 12);
+}
+
+function devAgentSteps(){
+    return devByLevel(4, 6, 8, 10, 12);
+}
+
+// quantas vezes uma parte reprovada pode ser regenerada
+function devRegenMax(){
+    return devByLevel(1, 2, 2, 3, 3);
+}
+
+function devMaxSkills(){
+    return devByLevel(6, 10, 14, 18, 24);
+}
+
+function devSkillsInPrompt(){
+    return devByLevel(2, 3, 3, 4, 5);
+}
+
+// bytes disponíveis para texto de prompt, dada a janela de contexto e os tokens de saída
+// (~3 bytes por token em português é uma estimativa segura)
+function devPromptChars(var ctxTokens, var outTokens){
+    var b = (ctxTokens - outTokens - 600) * 3;
+    if (b < 2000){ b = 2000; }
+    return floor(b);
+}
+
+// bytes de lições (contexto aprendido) injetados em cada parte: cresce com o nível
+function devLessonChars(var ctxTokens){
+    var pc = devPromptChars(ctxTokens, devSegTokens(ctxTokens));
+    var f = devByLevel(0.12, 0.18, 0.24, 0.30, 0.35);
+    return floor(pc * f);
+}
+
+// bytes do texto já escrito que voltam no prompt para continuar de onde parou
+function devTailChars(var ctxTokens){
+    var pc = devPromptChars(ctxTokens, devSegTokens(ctxTokens));
+    var f = devByLevel(0.20, 0.25, 0.30, 0.30, 0.30);
+    return floor(pc * f);
+}
+
+// acima disto o Arquivista compacta o arquivo de lições
+function devStoreMax(var ctxTokens){
+    return devLessonChars(ctxTokens) * 3;
+}
+
+// bytes do histórico do agente
+function devHistoryChars(var ctxTokens){
+    return devPromptChars(ctxTokens, 2048);
+}
+
+function devSummary(var ctxTokens){
+    var s = "nivel " + devLvl + " (" + devStage() + "), xp " + devXp;
+    var nx = devNextXp();
+    if (nx != -1){
+        s = s + "/" + nx;
+    }
+    s = s + ", " + devMaxArms() + " bracos, " + devSegTokens(ctxTokens) + " tokens/parte, ate " + devMaxSegs() + " partes";
+    return s;
+}
+
+Bundle DESENVOLVIMENTO{
+    devInit();
+    devXpNow();
+    devLevel();
+    devNextXp();
+    devStage();
+    devGain();
+    devTarget();
+    devMaxArms();
+    devSegTokens();
+    devMaxSegs();
+    devAgentSteps();
+    devRegenMax();
+    devMaxSkills();
+    devSkillsInPrompt();
+    devPromptChars();
+    devLessonChars();
+    devTailChars();
+    devStoreMax();
+    devHistoryChars();
+    devSummary();
+}

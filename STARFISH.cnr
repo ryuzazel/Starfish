@@ -1,0 +1,144 @@
+Gather(Bundle ACC){}
+Gather(Bundle INTERRADII){}
+
+// 127.0.0.1: o Starfish tem ferramentas de arquivo/HTTP, não exponha em 0.0.0.0 sem autenticação.
+var server = Server() {
+    host = "127.0.0.1";
+    port = 7070;
+    https = false;
+    threads = 8;
+    backlog = 1024;
+    keepAlive = true;
+    readTimeout = 30;
+    writeTimeout = 30;
+    serverName = "Starfish";
+    logRequests = true;
+};
+
+// A fila são os arrays paralelos abaixo; o worker consome a partir de `head` (FIFO).
+// Índice = id - 1.
+mutable var[] taskRaw;
+mutable var[] taskStatus;
+mutable var[] taskResult;
+mutable var[] taskRay;
+mutable var[] taskEvents;     // paradas do revisor, erros, regeneracoes e evolucoes de cada tarefa
+mutable var[] taskTool;
+mutable var head = 0;
+mutable var processed = 0;
+mutable var running = true;
+mutable var report = "";          // estado dos bracos (papel, geracao, pontos)
+mutable var summary = "";         // nivel, xp, contexto, skills, erros pegos
+mutable var skillsReport = "";
+mutable var contextReport = "";
+mutable var level = 1;
+mutable var currentTask = 0;      // id da tarefa em execucao (0 = nenhuma)
+
+// publica o estado do anel para os endpoints (que rodam em outras threads)
+function publish(){
+    report = ACC.acStatus();
+    summary = ACC.acSummary();
+    skillsReport = ACC.acSkillsReport();
+    contextReport = ACC.acContextReport();
+    level = ACC.acLevel();
+}
+
+function worker(){
+    var again = true;
+    while(again){
+        // qualquer erro interno vira "failed" com a mensagem, em vez de matar o worker
+        // (antes a tarefa ficava "running" para sempre)
+        try {
+            ACC.acTick();
+            var pending = len(taskRaw) - head;
+            if (pending > 0){
+                var idx = head;
+                head = head + 1;
+                taskStatus[idx] = "running";
+                currentTask = idx + 1;
+                try {
+                    var r = ACC.acProcess(taskRaw[idx]);
+                    taskResult[idx] = r[1];
+                    taskRay[idx] = r[2];
+                    taskTool[idx] = r[3];
+                    taskEvents[idx] = r[4];
+                    if (r[0] == 1){
+                        taskStatus[idx] = "done";
+                    } else {
+                        taskStatus[idx] = "failed";
+                    }
+                } catch(var pe) {
+                    taskResult[idx] = "erro interno: " + pe;
+                    taskStatus[idx] = "failed";
+                    INTERRADII.interLog("ERRO INTERNO na tarefa " + (idx + 1) + ": " + pe);
+                }
+                processed = processed + 1;
+                currentTask = 0;
+                publish();
+            }
+        } catch(var we) {
+            INTERRADII.interLog("ERRO INTERNO no worker: " + we);
+        }
+        sleep(ACC.acPace(len(taskRaw) - head));
+        again = running;
+    }
+}
+
+// POST /tasks  { "task": "read:notas.txt" }
+server.POST("/tasks") {
+    var task = "";
+    try {
+        var json = request.json;
+        task = (string)json.task;
+    } catch(var e) {
+        response.status = 400;
+        response.header("Content-Type", "application/json");
+        return { "error": "corpo invalido, use {\"task\": \"ferramenta:argumento\"}" };
+    }
+    taskRaw.push(task);
+    taskStatus.push("queued");
+    taskResult.push("");
+    taskRay.push(-1);
+    taskEvents.push("");
+    taskTool.push(-1);
+    var id = len(taskRaw);
+    response.status = 202;
+    response.header("Content-Type", "application/json");
+    return { "taskId": id, "status": "queued" };
+};
+
+server.GET("/tasks/:id") {
+    var idNum = (Int)request.params.id;
+    response.header("Content-Type", "application/json");
+    if (idNum < 1 || idNum > len(taskRaw)){
+        response.status = 404;
+        return { "error": "task not found" };
+    }
+    var i = idNum - 1;
+    response.status = 200;
+    return { "id": idNum, "status": taskStatus[i], "result": taskResult[i], "ray": taskRay[i], "tool": taskTool[i], "events": taskEvents[i] };
+};
+
+server.GET("/status") {
+    response.status = 200;
+    response.header("Content-Type", "application/json");
+    return { "processed": processed, "pending": len(taskRaw) - head, "running": currentTask, "progress": INTERRADII.interReadProgress(), "level": level, "summary": summary, "rays": report };
+};
+
+// o que o Starfish aprendeu sozinho
+server.GET("/skills") {
+    response.status = 200;
+    response.header("Content-Type", "application/json");
+    return { "skills": skillsReport };
+};
+
+// licoes (contexto) gravadas pelo arquivista
+server.GET("/context") {
+    response.status = 200;
+    response.header("Content-Type", "application/json");
+    return { "lessons": contextReport };
+};
+
+ACC.acInit();
+publish();
+var w = thread(worker);   // ANTES do server.start()
+server.start();

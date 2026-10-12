@@ -1,0 +1,45 @@
+//Como lidar com o ambiente externo? O que será posto no madreporito e o que saiu do Ambulacro?
+// Aqui ficam o log (memória do ambiente), os caminhos de arquivos do Starfish e o "ritmo" do corpo
+// em resposta ao estímulo.
+
+var interDirName = "starfish_workspace/";   // pasta do Starfish (sandbox das ferramentas de arquivo)
+
+// caminho de um arquivo de estado dentro da pasta do Starfish (context.txt, skills.txt, estado.txt)
+function interPath(var name){
+    return interDirName + name;
+}
+
+function interLog(var msg){
+    appendFile("starfish.log", msg + "\n");
+}
+
+// progresso em tempo real: fica em arquivo porque os endpoints (outras threads) enxergam
+// o arquivo na hora, mas nao veem variaveis que o worker muda
+function interProgress(var msg){
+    writeFile(interPath("progresso.txt"), msg);
+}
+
+function interReadProgress(){
+    var p = interPath("progresso.txt");
+    if (fileExists(p)){
+        return (string)readFile(p);
+    }
+    return "ocioso";
+}
+
+// mais tarefas pendentes -> ciclo mais rápido (ms entre ticks)
+function interPace(var pending){
+    var ms = 100 / (1 + pending);
+    if (ms < 10){
+        ms = 10;
+    }
+    return ms;
+}
+
+Bundle INTERRADII{
+    interLog();
+    interPace();
+    interPath();
+    interProgress();
+    interReadProgress();
+}

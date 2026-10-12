@@ -1,0 +1,1296 @@
+Gather(Bundle Radii){}
+Gather(Bundle MADREPORITO){}
+Gather(Bundle INTERRADII){}
+Gather(Bundle CANAL){}
+Gather(Bundle CONTEXTO){}
+Gather(Bundle SKILLS){}
+Gather(Bundle DESENVOLVIMENTO){}
+Gather(Bundle INDICADORES){}
+
+// ACC — o anel que coordena os braços.
+//
+// COMO O ANEL TRABALHA AGORA
+//  * Cada braço tem um PAPEL (RAY.cnr): executor, revisor, arquivista, ferreiro, planejador.
+//  * Respostas longas (`gen:`) saem em PARTES. Cada parte escrita por um executor passa por um
+//    REVISOR. Se o revisor acha um erro, ele PARA a resposta naquele ponto (a parte é descartada),
+//    aponta o erro, dá PONTOS NEGATIVOS ao executor, o ARQUIVISTA grava uma lição (contexto novo)
+//    e a parte é REGENERADA com a correção no prompt. Erro grave regenera o próprio braço
+//    (ele renasce com a lição no seu "briefing"). Dor demais faz o braço sumir e renascer.
+//  * Com 2+ revisores, um revisor confirma a acusação do outro; alarme falso custa pontos ao
+//    revisor que errou. Skills que só atrapalham são descartadas (e o ferreiro perde pontos).
+//  * Erros repetidos viram SKILLS (ferreiro). O contexto de lições cresce e é compactado.
+//  * XP -> níveis (DESENVOLVIMENTO.cnr): mais braços, mais tokens, mais partes, mais contexto.
+//  * Distribuição: o braço é escolhido pelo peso aprendido, com carga (cansaço) descontada, e o
+//    papel de um braço que renasce é decidido pela falta/demanda de cada papel no anel.
+
+var regenTicks = 5;      // ticks (~100ms cada) entre a morte de um braço e o nascimento do substituto
+var shareRate = 0.15;    // quanto do aprendizado de um braço se espalha aos outros
+var accProgress = "ocioso";   // o que o anel esta fazendo agora (aparece em /status e no log)
+var accEvents = "";      // eventos (paradas, erros, regenerações) da tarefa em andamento
+var accErrSinceForge = 0;
+var accCaught = 0;       // erros pegos por revisores
+var accFixed = 0;        // erros corrigidos depois da regeneração
+var accRegens = 0;       // braços regenerados por ordem de um revisor
+var accForged = 0;       // skills criadas
+var accFalseAlarms = 0;  // acusações derrubadas pelo 2º revisor
+var[] accMiss = {0,0,0,0,0};   // demanda não atendida por papel (alimenta a redistribuição)
+
+// ------------------------------------------------------------------ eventos
+
+// progresso passo a passo (log + /status): permite ver se uma resposta longa esta andando
+function acProg(var msg){
+    accProgress = msg;
+    INTERRADII.interProgress(msg);
+    INTERRADII.interLog("[progresso] " + msg);
+}
+
+function acEv(var msg){
+    INTERRADII.interLog(msg);
+    if (len(stringToChars(accEvents)) < 8000){
+        accEvents = accEvents + msg + "\n";
+    }
+}
+
+// ------------------------------------------------------------------ anel
+
+// posição da ferramenta na Worklist do braço (-1 se não sabe operar)
+function acSlot(var r, var toolId){
+    for(var k = 0; k < len(r.Worklist); k++){
+        if (r.Worklist[k] == toolId){
+            return k;
+        }
+    }
+    return -1;
+}
+
+// papel responsável por cada ferramenta
+function acRoleOfTool(var t){
+    if (t == 9){ return 1; }
+    if (t == 7 || t == 8 || t == 12){ return 2; }
+    if (t == 10){ return 3; }
+    if (t == 11){ return 4; }
+    return 0;
+}
+
+// quantos braços do papel existem (vivos ou renascendo), ignorando o `skip`
+function acTotalRole(var rl){
+    var n = 0;
+    for(var i = 0; i < len(PentaRadii); i++){
+        if (PentaRadii[i].role == rl){
+            n = n + 1;
+        }
+    }
+    return n;
+}
+
+function acAliveRole(var rl, var skip){
+    var n = 0;
+    for(var i = 0; i < len(PentaRadii); i++){
+        var r = PentaRadii[i];
+        if (i != skip && r.role == rl && r.alive == 1){
+            n = n + 1;
+        }
+    }
+    return n;
+}
+
+// primeiro braço vivo do papel (-1 se nenhum)
+function acFindRole(var rl){
+    for(var i = 0; i < len(PentaRadii); i++){
+        var r = PentaRadii[i];
+        if (r.role == rl && r.alive == 1){
+            return i;
+        }
+    }
+    return -1;
+}
+
+// nasce braço novo onde o nível atual pede mais braços (o anel cresce com o desenvolvimento)
+function acGrow(){
+    var born = 0;
+    for(var rl = 0; rl < 5; rl++){
+        var have = acTotalRole(rl);
+        var want = DESENVOLVIMENTO.devTarget(rl);
+        while(have < want){
+            PentaRadii.push(Radii.CreateRay(rl));
+            have = have + 1;
+            born = born + 1;
+            INTERRADII.interLog("nasceu braco novo: " + Radii.RoleName(rl) + " (anel com " + len(PentaRadii) + " bracos)");
+        }
+    }
+    return born;
+}
+
+function acInit(){
+    DESENVOLVIMENTO.devInit();
+    CONTEXTO.ctxInit();
+    SKILLS.skInit();
+    acGrow();   // um Starfish salvo como adulto reinicia adulto
+    INTERRADII.interLog("ACC: " + len(PentaRadii) + " bracos prontos | " + DESENVOLVIMENTO.devSummary(CANAL.canalCtx()));
+    INTERRADII.interLog("ACC: " + CONTEXTO.ctxCount() + " licoes, " + SKILLS.skCount() + " skills carregadas");
+    INTERRADII.interLog(CANAL.canalBoot());
+}
+
+// XP: pode subir o nível e fazer o anel crescer
+function acGain(var n){
+    var lv = DESENVOLVIMENTO.devGain(n);
+    if (lv > 0){
+        var born = acGrow();
+        acEv("EVOLUCAO: o Starfish subiu para o nivel " + lv + " (" + DESENVOLVIMENTO.devStage() + "); nasceram " + born + " bracos novos, anel com " + len(PentaRadii) + " bracos");
+    }
+}
+
+// decide o papel de um braço que renasce: o que mais falta no anel (alvo do nível menos os
+// vivos) + demanda não atendida; com uma pequena inércia para manter o papel atual
+function acPickRole(var i){
+    var cur = PentaRadii[i].role;
+    var bestRole = cur;
+    var bestScore = -999;
+    for(var rl = 0; rl < 5; rl++){
+        var deficit = DESENVOLVIMENTO.devTarget(rl) - acAliveRole(rl, i);
+        var sc = deficit * 10 + accMiss[rl];
+        if (rl == cur){
+            sc = sc + 0.5;
+        }
+        if (sc > bestScore){
+            bestScore = sc;
+            bestRole = rl;
+        }
+    }
+    return bestRole;
+}
+
+// escolhe o braço vivo com melhor peso para a ferramenta, sem o braço `exclude`.
+// boldness adiciona ruído (exploração); carga e dor recentes descontam (distribuição do trabalho).
+function acChooseRayEx(var toolId, var exclude){
+    var best = -1;
+    var bestScore = -999;
+    for(var i = 0; i < len(PentaRadii); i++){
+        var r = PentaRadii[i];
+        if (r.alive == 1 && i != exclude){
+            var k = acSlot(r, toolId);
+            if (k != -1){
+                var score = r.memory[k] + random(0,1) * r.singularities[0] * 0.1 - 0.06 * r.load - 0.02 * r.pain;
+                if (score > bestScore){
+                    bestScore = score;
+                    best = i;
+                }
+            }
+        }
+    }
+    return best;
+}
+
+function acChooseRay(var toolId){
+    return acChooseRayEx(toolId, -1);
+}
+
+// o braço desaparece (sinal negativo demais)
+function acRetreat(var i){
+    var r = PentaRadii[i];
+    r.alive = 0;
+    r.timeRemaing = regenTicks;
+    r.CurrentWork = -1;
+    acEv("braco " + i + " (" + Radii.RoleName(r.role) + ", geracao " + r.generation + ") sumiu por sinal negativo");
+}
+
+// nasce um novo braço no mesmo lugar do anel, com o papel que o anel mais precisa.
+// A memória vem da média ponderada dos braços vivos com taxa de sucesso >= 0.4 (+ mutação),
+// as singularidades do melhor braço do mesmo papel (+ mutação).
+function acReplace(var i){
+    var r = PentaRadii[i];
+    var n = len(PentaRadii);
+    var newRole = acPickRole(i);
+    var oldRole = r.role;
+    var wl = Radii.RoleTools(newRole);
+
+    var[] w;
+    var best = -1;
+    var bestW = 0;
+    var bestSame = -1;
+    var bestSameW = 0;
+    for(var j = 0; j < n; j++){
+        var weight = 0;
+        if (j != i){
+            var o = PentaRadii[j];
+            if (o.alive == 1){
+                var fit = (o.successes + 1) / (o.successes + o.failures + 2);
+                if (fit >= 0.4){
+                    weight = fit;
+                }
+            }
+        }
+        w.push(weight);
+        if (weight > bestW){
+            bestW = weight;
+            best = j;
+        }
+        if (weight > bestSameW && PentaRadii[j].role == newRole){
+            bestSameW = weight;
+            bestSame = j;
+        }
+    }
+
+    var[] mm;
+    for(var k = 0; k < len(wl); k++){
+        var num = 0;
+        var den = 0;
+        for(var j2 = 0; j2 < n; j2++){
+            if (w[j2] > 0){
+                var src = PentaRadii[j2];
+                var sk = acSlot(src, wl[k]);
+                if (sk != -1){
+                    num = num + w[j2] * src.memory[sk];
+                    den = den + w[j2];
+                }
+            }
+        }
+        var v = 0.5;
+        if (den > 0){
+            v = num / den;
+        }
+        v = v + random(-0.05, 0.05);
+        if (v < 0){ v = 0; }
+        if (v > 1){ v = 1; }
+        mm.push(v);
+    }
+    r.role = newRole;
+    r.Worklist = wl.clone();
+    r.memory = mm.clone();
+
+    var parent = bestSame;
+    if (parent == -1){
+        parent = best;
+    }
+    for(var q = 0; q < 3; q++){
+        var base = random(0,3) * random(0,2) + 0.34;
+        if (parent != -1){
+            var par = PentaRadii[parent];
+            base = par.singularities[q] * random(0.8, 1.2);
+        }
+        r.singularities[q] = base;
+    }
+
+    r.alive = 1;
+    r.pain = 0;
+    r.successes = 0;
+    r.failures = 0;
+    r.strikes = 0;
+    r.credits = 0;
+    r.load = 0;
+    r.briefing = "";
+    if (newRole == 0){
+        // o executor que renasce já nasce com as lições mais recentes como contexto
+        r.briefing = CONTEXTO.ctxRecall(600, "");
+    }
+    r.generation = r.generation + 1;
+    r.timeRemaing = regenTicks;
+    r.CurrentWork = -1;
+    accMiss[newRole] = 0;
+    var from = "";
+    if (oldRole != newRole){
+        from = " (era " + Radii.RoleName(oldRole) + ")";
+    }
+    acEv("novo braco no slot " + i + ": " + Radii.RoleName(newRole) + from + ", geracao " + r.generation + ", herdou de " + parent);
+}
+
+// regeneração ORDENADA por um revisor: o braço renasce na hora, com a lição como briefing
+function acRegenerate(var i, var lesson){
+    var r = PentaRadii[i];
+    acEv("regenerando o braco " + i + " (" + Radii.RoleName(r.role) + ") por ordem do revisor");
+    r.alive = 0;
+    acReplace(i);
+    var r2 = PentaRadii[i];
+    r2.briefing = MADREPORITO.madShort(lesson + "\n" + r2.briefing, 900);
+    accRegens = accRegens + 1;
+}
+
+function acTick(){
+    for(var i = 0; i < len(PentaRadii); i++){
+        var r = PentaRadii[i];
+        if (r.alive == 0){
+            r.timeRemaing = r.timeRemaing - 1;
+            if (r.timeRemaing <= 0){
+                acReplace(i);
+            }
+        }
+    }
+}
+
+// se nenhum braço vivo sabe a ferramenta, antecipa o nascimento de um braço morto que saiba
+function acRevive(var toolId, var exclude){
+    for(var i = 0; i < len(PentaRadii); i++){
+        var r = PentaRadii[i];
+        if (r.alive == 0 && i != exclude && acSlot(r, toolId) != -1){
+            acReplace(i);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+// seleciona o braço para a ferramenta (com demanda e reviver); -1 se não há
+function acPickArm(var toolId, var exclude){
+    var idx = acChooseRayEx(toolId, exclude);
+    if (idx == -1){
+        var rl = acRoleOfTool(toolId);
+        accMiss[rl] = accMiss[rl] + 1;
+        if (acRevive(toolId, exclude) == 1){
+            idx = acChooseRayEx(toolId, exclude);
+        }
+    }
+    return idx;
+}
+
+// ------------------------------------------------------------------ aprendizado e pontos
+
+// aprendizado do braço que agiu: atualiza seu peso, difunde aos outros que sabem a ferramenta
+// e acumula dor se falhou
+function acLearn(var i, var toolId, var ok){
+    var r = PentaRadii[i];
+    var k = acSlot(r, toolId);
+    var reward = 0;
+    if (ok == 1){
+        reward = 1;
+        r.successes = r.successes + 1;
+        r.pain = r.pain * 0.5;
+    } else {
+        r.failures = r.failures + 1;
+        r.pain = r.pain + 1;
+    }
+    if (k != -1){
+        var plast = r.singularities[2];
+        var lr = plast / (plast + 3);
+        r.memory[k] = r.memory[k] + lr * (reward - r.memory[k]);
+
+        for(var j = 0; j < len(PentaRadii); j++){
+            if (j != i){
+                var o = PentaRadii[j];
+                if (o.alive == 1){
+                    var ok2 = acSlot(o, toolId);
+                    if (ok2 != -1){
+                        o.memory[ok2] = o.memory[ok2] + shareRate * (r.memory[k] - o.memory[ok2]);
+                    }
+                }
+            }
+        }
+    }
+
+    var painLimit = 6 / (1 + r.singularities[1]) + 1;
+    if (r.pain > painLimit){
+        acRetreat(i);
+    }
+}
+
+// PONTOS NEGATIVOS de um revisor (ou do ACC) a um braço: dor, falha de qualidade e queda do peso
+// da ferramenta. Devolve 1 se o braço sumiu por isso.
+function acPenalize(var i, var toolId, var sev, var why){
+    if (i < 0){
+        return 0;
+    }
+    var r = PentaRadii[i];
+    r.pain = r.pain + sev;
+    r.strikes = r.strikes + sev;
+    r.failures = r.failures + 1;
+    var k = acSlot(r, toolId);
+    if (k != -1){
+        r.memory[k] = r.memory[k] * (1 - 0.12 * sev);
+    }
+    acEv("pontos negativos (" + sev + ") para o braco " + i + " [" + Radii.RoleName(r.role) + "]: " + MADREPORITO.madShort(why, 160));
+    var painLimit = 6 / (1 + r.singularities[1]) + 1;
+    if (r.alive == 1 && r.pain > painLimit){
+        acRetreat(i);
+        return 1;
+    }
+    return 0;
+}
+
+// ponto positivo (um revisor confirmou/um erro foi corrigido)
+function acCredit(var i){
+    if (i < 0){
+        return;
+    }
+    var r = PentaRadii[i];
+    r.credits = r.credits + 1;
+    r.pain = r.pain * 0.7;
+}
+
+// ------------------------------------------------------------------ execução em braços
+
+// roda uma ferramenta em um braço já escolhido; retorna {ok, texto, braço}
+function acRunAt(var idx, var toolId, var arg){
+    var res[] = {0, "", idx};
+    var r = PentaRadii[idx];
+    // distribuição: todo uso esfria os outros e esquenta este
+    for(var j = 0; j < len(PentaRadii); j++){
+        var rj = PentaRadii[j];
+        rj.load = rj.load * 0.85;
+    }
+    r.load = r.load + 1;
+    var okN = 0;
+    try {
+        res[1] = CANAL.canalCarry(PentaRadii[idx], toolId, arg);
+        okN = 1;
+    } catch(var e) {
+        res[1] = e;
+    }
+    res[0] = okN;
+    acLearn(idx, toolId, okN);
+    return res;
+}
+
+// executa uma ferramenta em um braço apto (sem Nodes/retry); retorna {ok, texto, braço}
+function acRunOnArmEx(var toolId, var arg, var exclude){
+    var res[] = {0, "", -1};
+    var idx = acPickArm(toolId, exclude);
+    if (idx == -1){
+        res[1] = "nenhum braco vivo apto";
+        return res;
+    }
+    return acRunAt(idx, toolId, arg);
+}
+
+function acRunOnArm(var toolId, var arg){
+    return acRunOnArmEx(toolId, arg, -1);
+}
+
+// ------------------------------------------------------------------ revisão
+
+// lê o veredito do revisor: {ok(1/0), gravidade, descrição, correção}
+// O revisor pode raciocinar em poucas linhas e terminar com "VEREDITO: OK" ou
+// "VEREDITO: ERRO <gravidade> | <o que> | <como corrigir>". Vale a ÚLTIMA linha que comece
+// (depois de "VEREDITO:") com OK ou ERRO. Sem veredito legível, conta como OK.
+function acVerdictLine(var line){
+    var res[] = {1, 0, "", ""};
+    var up = MADREPORITO.madUpper(line);
+    if (MADREPORITO.madStarts(up, "ERRO") == 1){
+        var parts = MADREPORITO.madSplit(line, 124);
+        var sev = MADREPORITO.madFirstDigit(parts[0]);
+        if (sev < 1){ sev = 2; }
+        if (sev > 3){ sev = 3; }
+        var desc = "erro nao detalhado";
+        var fix = "refaca o trecho corrigindo o erro";
+        if (len(parts) > 1 && MADREPORITO.madTrim(parts[1]) != ""){
+            desc = MADREPORITO.madTrim(parts[1]);
+        }
+        if (len(parts) > 2 && MADREPORITO.madTrim(parts[2]) != ""){
+            fix = MADREPORITO.madTrim(parts[2]);
+        }
+        res[0] = 0;
+        res[1] = sev;
+        res[2] = desc;
+        res[3] = fix;
+    }
+    return res;
+}
+
+function acParseVerdict(var text){
+    var lines = MADREPORITO.madSplit(MADREPORITO.madTrim(text), 10);
+    var found = 0;
+    var res[] = {1, 0, "", ""};
+    var i = len(lines) - 1;
+    while(i >= 0 && found == 0){
+        var l = MADREPORITO.madTrim(lines[i]);
+        var up = MADREPORITO.madUpper(l);
+        if (MADREPORITO.madStarts(up, "VEREDITO") == 1){
+            l = MADREPORITO.madTrimFrom(l, 8);
+            up = MADREPORITO.madUpper(l);
+        }
+        if (MADREPORITO.madStarts(up, "ERRO") == 1 || MADREPORITO.madStarts(up, "OK") == 1){
+            found = 1;
+            return acVerdictLine(l);
+        }
+        i = i - 1;
+    }
+    return res;
+}
+
+// quem acusou: revisor N, ou a verificacao automatica (indice -1)
+function acWho(var idx){
+    if (idx < 0){
+        return "a verificacao automatica";
+    }
+    return "o revisor " + idx;
+}
+
+// um REVISOR confere o trecho. Retorna {status, gravidade, descrição, correção, revisor}
+// status: 1 = aprovado, 0 = erro confirmado, 2 = não deu para revisar (segue sem revisão)
+function acReview(var goal, var part, var prior, var rules){
+    var out[] = {1, 0, "", "", -1, ""};
+    if (MADREPORITO.madTrim(part) == ""){
+        out[0] = 0;
+        out[1] = 2;
+        out[2] = "a parte veio vazia";
+        out[3] = "escreva o texto da parte pedida";
+        return out;
+    }
+    // indicadores SEM IA primeiro: nao dependem do modelo, entao nao falham por ele ser fraco
+    var ic = INDICADORES.indCheck(part, prior, goal);
+    out[5] = ic[5];
+    if (ic[0] == 0){
+        out[0] = 0;
+        out[1] = ic[1];
+        out[2] = "[indicador " + ic[2] + "] " + ic[3];
+        out[3] = ic[4];
+        return out;
+    }
+    var prompt = "OBJETIVO: " + MADREPORITO.madShort(goal, 800) + "\n";
+    if (rules != ""){
+        prompt = prompt + "REGRAS A RESPEITAR:\n" + MADREPORITO.madShort(rules, 1500) + "\n";
+    }
+    if (prior != ""){
+        prompt = prompt + "FINAL DO TEXTO ANTERIOR:\n" + MADREPORITO.madTail(prior, 600) + "\n";
+    }
+    prompt = prompt + "TRECHO:\n" + part;
+
+    var a = acRunOnArm(9, prompt);
+    if (a[0] == 0){
+        out[0] = 2;
+        out[2] = "sem revisao: " + a[1];
+        acEv("aviso: " + out[2]);
+        return out;
+    }
+    out[4] = a[2];
+    var v = acParseVerdict(a[1]);
+    if (v[0] == 1){
+        return out;
+    }
+
+    // 2º revisor (nível 3+): confirma a acusação antes de qualquer ponto negativo
+    var other = acChooseRayEx(9, a[2]);
+    if (other != -1){
+        var b = acRunAt(other, 9, prompt);
+        if (b[0] == 1){
+            var v2 = acParseVerdict(b[1]);
+            if (v2[0] == 1){
+                accFalseAlarms = accFalseAlarms + 1;
+                acEv("o revisor " + a[2] + " acusou erro, mas o revisor " + other + " discorda: alarme falso, parte aprovada");
+                acPenalize(a[2], 9, 1, "alarme falso derrubado pelo revisor " + other);
+                acCredit(other);
+                return out;
+            }
+            acCredit(other);
+            acEv("o revisor " + other + " confirmou o erro apontado pelo revisor " + a[2]);
+        }
+    }
+    out[0] = 0;
+    out[1] = v[1];
+    out[2] = v[2];
+    out[3] = v[3];
+    return out;
+}
+
+// ARQUIVISTA grava a lição (contexto novo). Se nenhum arquivista responder, grava direto.
+function acArchive(var lesson){
+    var a = acRunOnArm(8, "learn " + lesson);
+    if (a[0] == 0){
+        CONTEXTO.ctxAdd(lesson);
+    }
+}
+
+// ------------------------------------------------------------------ geração longa
+
+// o texto termina em um ponto natural (fim de frase, linha, bloco)? Se nao, a parte foi cortada
+// pelo limite de tokens no meio de algo e a proxima parte precisa completar, nao recomecar.
+function acEndsNatural(var text){
+    var c = stringToChars(text);
+    var i = len(c) - 1;
+    while(i >= 0 && (c[i] == 32 || c[i] == 9 || c[i] == 13)){
+        i = i - 1;
+    }
+    if (i < 0){
+        return 1;
+    }
+    var l = c[i];
+    // fim de linha, . ! ? : ; } ` " e fechamento de lista/titulo
+    if (l == 10 || l == 46 || l == 33 || l == 63 || l == 58 || l == 59 || l == 125 || l == 96 || l == 34){
+        return 1;
+    }
+    return 0;
+}
+
+// junta a nova parte ao texto sem partir linhas: se o texto foi cortado no meio, emenda direto
+// (ou com espaco); se terminou em ponto natural, abre nova linha
+function acJoin(var text, var part){
+    if (acEndsNatural(text) == 1){
+        return text + "\n" + part;
+    }
+    var p = stringToChars(part);
+    if (len(p) == 0){
+        return text;
+    }
+    var f = p[0];
+    // a parte comeca com pontuacao de fechamento: gruda (ex.: "(data" + ");" )
+    if (f == 41 || f == 93 || f == 125 || f == 44 || f == 46 || f == 59 || f == 58 || f == 33 || f == 63){
+        return text + part;
+    }
+    return text + " " + part;
+}
+
+// tira a marca [FIM]; devolve {texto, achou}
+function acStripFim(var part){
+    var res[] = {part, 0};
+    var at = MADREPORITO.madIndexOf(MADREPORITO.madUpper(part), "[FIM]", 0);
+    if (at != -1){
+        var total = len(stringToChars(part));
+        res[0] = MADREPORITO.madTrim(MADREPORITO.madSub(part, 0, at) + MADREPORITO.madSub(part, at + 5, total));
+        res[1] = 1;
+    }
+    return res;
+}
+
+function acSegPrompt(var goal, var plan, var rules, var skills, var text, var seg, var note, var brief, var tailChars, var segTok){
+    var p = "OBJETIVO: " + goal + "\n";
+    if (plan != ""){
+        p = p + "ROTEIRO:\n" + plan + "\n";
+    }
+    if (rules != ""){
+        p = p + "REGRAS (licoes aprendidas):\n" + rules;
+    }
+    if (skills != ""){
+        p = p + "SKILLS (siga):\n" + skills;
+    }
+    if (brief != ""){
+        p = p + "CONTEXTO DESTE BRACO:\n" + brief + "\n";
+    }
+    if (note != ""){
+        p = p + "CORRECAO OBRIGATORIA (a versao anterior desta parte foi reprovada pelo revisor): " + note + "\n";
+    }
+    if (text != ""){
+        p = p + "TEXTO JA ESCRITO (final):\n" + MADREPORITO.madTail(text, tailChars) + "\n";
+    }
+    p = p + "Escreva agora a PARTE " + seg + " (ate cerca de " + floor(segTok * 0.75) + " palavras). ";
+    if (text == ""){
+        p = p + "Comece o texto. ";
+    } else {
+        if (acEndsNatural(text) == 1){
+            p = p + "Continue exatamente de onde o texto parou. ";
+        } else {
+            p = p + "ATENCAO: o texto acima foi CORTADO no meio de uma frase ou linha de codigo. Comece escrevendo exatamente o que falta para completar esse ponto (sem repetir o que ja esta escrito e sem abrir funcoes ou blocos novos dentro de um trecho incompleto). ";
+        }
+    }
+    p = p + "Se o texto ficar completo nesta parte, termine com [FIM].";
+    return p;
+}
+
+// resposta LONGA em partes, com revisão. Retorna {ok, texto, braço, 6, eventos}
+function acGenerate(var goal, var forcedSkill){
+    var ctxTok = CANAL.canalCtx();
+    var segTok = DESENVOLVIMENTO.devSegTokens(ctxTok);
+    CANAL.canalSetTokens(segTok);
+    var maxSegs = DESENVOLVIMENTO.devMaxSegs();
+    var regenMax = DESENVOLVIMENTO.devRegenMax();
+    var tailChars = DESENVOLVIMENTO.devTailChars(ctxTok);
+    var lessonChars = DESENVOLVIMENTO.devLessonChars(ctxTok);
+
+    // contexto: lições relevantes + skills (a pedida primeiro)
+    var rules = CONTEXTO.ctxRecall(lessonChars, goal);
+    var[] picked = SKILLS.skPickBudget(goal, floor(lessonChars / 2));
+    var[] active;
+    if (forcedSkill != ""){
+        active.push(forcedSkill);
+    }
+    for(var s0 = 0; s0 < len(picked); s0++){
+        if (picked[s0] != forcedSkill){
+            active.push(picked[s0]);
+        }
+    }
+    var skillsText = SKILLS.skBlock(active);
+    acEv("skills em uso: " + acNames(active) + " | " + CONTEXTO.ctxCount() + " licoes no contexto");
+
+    // roteiro: o planejador entra quando o anel já o tem (nível 2+)
+    var plan = "";
+    acProg("gen iniciado: " + MADREPORITO.madShort(goal, 60) + " (ate " + maxSegs + " partes de " + segTok + " tokens)");
+    if (acTotalRole(4) > 0){
+        var pl = acRunOnArm(11, "OBJETIVO: " + MADREPORITO.madShort(goal, 1500));
+        if (pl[0] == 1){
+            plan = MADREPORITO.madShort(MADREPORITO.madTrim(pl[1]), 1500);
+            acEv("planejador " + pl[2] + " montou o roteiro");
+        }
+    }
+
+    var text = "";
+    var seg = 1;
+    var done = 0;
+    var failed = 0;
+    var failMsg = "";
+    var lastRay = -1;
+    var notes = "";
+    var errs = 0;
+    var skillBlamed = 0;
+
+    while(done == 0 && failed == 0 && seg <= maxSegs){
+        var attempt = 0;
+        var accepted = 0;
+        var note = "";
+        var flaggedBy = -1;
+        var part = "";
+        var lastDesc = "";
+        while(accepted == 0 && failed == 0 && attempt <= regenMax){
+            var gi = acPickArm(6, -1);
+            if (gi == -1){
+                failed = 1;
+                failMsg = "nenhum executor vivo";
+            } else {
+                lastRay = gi;
+                acProg("parte " + seg + "/" + maxSegs + " (tentativa " + (attempt + 1) + "): executor " + gi + " escrevendo");
+                var brief = PentaRadii[gi].briefing;
+                var prompt = acSegPrompt(goal, plan, rules, skillsText, text, seg, note, brief, tailChars, segTok);
+                var g = acRunAt(gi, 6, prompt);
+                if (g[0] == 0){
+                    failed = 1;
+                    failMsg = "executor falhou: " + g[1];
+                } else {
+                    part = MADREPORITO.madTrim(g[1]);
+                    acProg("parte " + seg + "/" + maxSegs + ": revisor conferindo (" + len(stringToChars(part)) + " bytes escritos)");
+                    var v = acReview(goal, part, text, skillsText);
+                    acProg("parte " + seg + "/" + maxSegs + ": indicadores [" + v[5] + "]");
+                    if (v[0] != 0){
+                        acProg("parte " + seg + "/" + maxSegs + " aprovada");
+                        accepted = 1;
+                        acCredit(gi);
+                        acGain(1);
+                        if (flaggedBy != -1){
+                            acCredit(flaggedBy);
+                            accFixed = accFixed + 1;
+                            acGain(2);
+                            acEv("parte " + seg + " corrigida apos a revisao (tentativa " + (attempt + 1) + ")");
+                        }
+                    } else {
+                        // o revisor PARA a resposta aqui: a parte é descartada
+                        var sev = v[1];
+                        errs = errs + 1;
+                        accCaught = accCaught + 1;
+                        accErrSinceForge = accErrSinceForge + 1;
+                        lastDesc = v[2];
+                        acEv("PARADA na parte " + seg + ": " + acWho(v[4]) + " apontou erro (gravidade " + sev + "): " + v[2] + " | correcao: " + v[3]);
+                        acPenalize(gi, 6, sev, v[2]);
+                        var lesson = "[" + MADREPORITO.madShort(MADREPORITO.madOneLine(goal), 50) + "] erro: " + v[2] + " -> correcao: " + v[3];
+                        acArchive(lesson);
+                        // o contexto novo já vale para a próxima tentativa
+                        rules = CONTEXTO.ctxRecall(lessonChars, goal);
+                        note = MADREPORITO.madShort(v[2] + ". Faca assim: " + v[3], 500);
+                        flaggedBy = v[4];
+                        // skills so perdem nota por erro de CONTEUDO apontado pelo revisor-modelo, e uma
+                        // vez por tarefa (loops e repeticoes sao do modelo, nao das skills)
+                        if (v[4] != -1 && skillBlamed == 0){
+                            skillBlamed = 1;
+                            for(var sf = 0; sf < len(active); sf++){
+                                if (SKILLS.skFeedback(active[sf], -0.1) == 1){
+                                    acEv("skill " + active[sf] + " descartada: so atrapalhava");
+                                    acPenalize(acFindRole(3), 10, 1, "skill descartada: " + active[sf]);
+                                }
+                            }
+                        }
+                        if (sev >= 3 && PentaRadii[gi].alive == 1){
+                            acRegenerate(gi, lesson);
+                        }
+                        attempt = attempt + 1;
+                    }
+                }
+            }
+        }
+
+        if (failed == 0){
+            if (accepted == 0){
+                // esgotou as regenerações: segue com ressalva escrita (sem esconder o problema)
+                notes = notes + "- parte " + seg + ": " + MADREPORITO.madShort(lastDesc, 200) + " (nao resolvido)\n";
+                acEv("parte " + seg + " seguiu COM RESSALVA: erro nao resolvido apos " + (regenMax + 1) + " tentativas");
+            } else {
+                if (attempt == 0){
+                    for(var sg = 0; sg < len(active); sg++){
+                        SKILLS.skFeedback(active[sg], 0.05);
+                    }
+                }
+            }
+            var sp = acStripFim(part);
+            if (sp[0] != ""){
+                if (text == ""){
+                    text = sp[0];
+                } else {
+                    text = acJoin(text, sp[0]);
+                }
+            }
+            if (sp[1] == 1){
+                done = 1;
+            }
+            seg = seg + 1;
+        }
+    }
+
+    var res[] = {1, "", lastRay, 6, ""};
+    if (failed == 1){
+        res[0] = 0;
+        if (text == ""){
+            res[1] = failMsg;
+        } else {
+            res[1] = text + "\n\n[interrompido: " + failMsg + "]";
+        }
+    } else {
+        if (done == 0){
+            notes = notes + "- limite de " + maxSegs + " partes atingido sem [FIM]; use gen de novo para continuar\n";
+        }
+        res[1] = text;
+        if (notes != ""){
+            res[1] = text + "\n\n[notas de revisao]\n" + notes;
+        }
+    }
+    return res;
+}
+
+// ------------------------------------------------------------------ skills (ferreiro)
+
+// o FERREIRO cria (ou refina) uma skill a partir do material dado. Devolve o nome ("" se falhou).
+function acForge(var material){
+    var prompt = "MATERIAL:\n" + MADREPORITO.madShort(material, 3000) + "\n";
+    var names = SKILLS.skNamesLine();
+    if (names != ""){
+        prompt = prompt + "SKILLS JA EXISTENTES (nao duplique; para refinar use o mesmo nome): " + names + "\n";
+    }
+    prompt = prompt + "Crie UMA skill.";
+    var f = acRunOnArm(10, prompt);
+    if (f[0] == 0){
+        acEv("ferreiro nao conseguiu criar skill: " + MADREPORITO.madShort(f[1], 120));
+        return "";
+    }
+    var line = MADREPORITO.madFirstLine(MADREPORITO.madTrim(f[1]));
+    if (MADREPORITO.madStarts(line, "- ") == 1 || MADREPORITO.madStarts(line, "* ") == 1){
+        line = MADREPORITO.madTrimFrom(line, 1);
+    }
+    var parts = MADREPORITO.madSplit(line, 124);
+    if (len(parts) < 2){
+        acPenalize(f[2], 10, 1, "skill fora do formato nome | instrucao");
+        return "";
+    }
+    var instr = "";
+    for(var i = 1; i < len(parts); i++){
+        if (i > 1){ instr = instr + " "; }
+        instr = instr + parts[i];
+    }
+    var nm = SKILLS.skAdd(parts[0], instr, DESENVOLVIMENTO.devMaxSkills());
+    if (nm == ""){
+        acPenalize(f[2], 10, 1, "skill invalida (nome ou instrucao vazios)");
+        return "";
+    }
+    accForged = accForged + 1;
+    accErrSinceForge = 0;
+    acCredit(f[2]);
+    acEv("ferreiro " + f[2] + " criou a skill '" + nm + "'");
+    acGain(4);
+    return nm;
+}
+
+// ------------------------------------------------------------------ manutenção (depois de cada tarefa)
+
+function acMaintain(){
+    var ctxTok = CANAL.canalCtx();
+
+    // arquivista: contexto grande demais -> compacta
+    var storeMax = DESENVOLVIMENTO.devStoreMax(ctxTok);
+    var size = CONTEXTO.ctxSize();
+    if (size > storeMax){
+        var keep = floor(DESENVOLVIMENTO.devLessonChars(ctxTok) / 120);
+        if (keep < 6){ keep = 6; }
+        var cap = DESENVOLVIMENTO.devPromptChars(ctxTok, 1500);
+        var c = acRunOnArm(12, "Condense em no maximo " + keep + " licoes:\n" + MADREPORITO.madHead(CONTEXTO.ctxAll(), cap));
+        if (c[0] == 1){
+            var kept = CONTEXTO.ctxReplaceAll(c[1]);
+            if (kept > 0){
+                acEv("arquivista " + c[2] + " compactou o contexto: " + size + " bytes -> " + CONTEXTO.ctxSize() + " bytes (" + kept + " licoes)");
+                acGain(1);
+            } else {
+                acPenalize(c[2], 12, 1, "compactacao veio vazia (contexto mantido)");
+            }
+        }
+    }
+
+    // ferreiro: erros repetidos viram skill
+    if (accErrSinceForge >= 3){
+        acForge("Erros recentes e como foram corrigidos:\n" + CONTEXTO.ctxLast(8));
+    }
+}
+
+// "a, b, c" dos nomes (ou "nenhuma")
+function acNames(var names){
+    if (len(names) == 0){
+        return "nenhuma";
+    }
+    var s = "";
+    for(var i = 0; i < len(names); i++){
+        if (i > 0){ s = s + ", "; }
+        s = s + names[i];
+    }
+    return s;
+}
+
+// ask: pergunta direta ao modelo, agora com as SKILLS e as lições relevantes injetadas por padrão,
+// e a resposta passa pelos indicadores (sem IA); se reprovar, uma nova tentativa com a correção.
+// Retorna {ok, texto, braço, 4, eventos}
+function acAsk(var question){
+    var ctxTok = CANAL.canalCtx();
+    var budget = DESENVOLVIMENTO.devLessonChars(ctxTok);
+    var[] active = SKILLS.skPickBudget(question, floor(budget / 2));
+    var skillsText = SKILLS.skBlock(active);
+    var rules = CONTEXTO.ctxRecall(floor(budget / 2), question);
+    acEv("skills em uso: " + acNames(active) + " | " + CONTEXTO.ctxCount() + " licoes no contexto");
+
+    var ctxText = "";
+    if (skillsText != ""){
+        ctxText = ctxText + "SKILLS (siga):\n" + skillsText;
+    }
+    if (rules != ""){
+        ctxText = ctxText + "REGRAS APRENDIDAS:\n" + rules;
+    }
+    var prompt = question;
+    if (ctxText != ""){
+        prompt = ctxText + "PERGUNTA: " + question;
+    }
+
+    var out[] = {0, "", -1, 4, ""};
+    var a = acRunOnArm(4, prompt);
+    out[2] = a[2];
+    if (a[0] == 0){
+        out[1] = a[1];
+        return out;
+    }
+    var answer = a[1];
+    var ic = INDICADORES.indCheck(answer, "", question);
+    acProg("ask: indicadores [" + ic[5] + "]");
+    if (ic[0] == 0){
+        acEv("PARADA no ask: indicador '" + ic[2] + "' reprovou a resposta (gravidade " + ic[1] + "): " + ic[3]);
+        acPenalize(a[2], 4, ic[1], ic[3]);
+        var b = acRunOnArm(4, prompt + "\nCORRECAO OBRIGATORIA (sua resposta anterior foi reprovada): " + ic[3] + ". " + ic[4]);
+        if (b[0] == 1){
+            var ic2 = INDICADORES.indCheck(b[1], "", question);
+            answer = b[1];
+            out[2] = b[2];
+            if (ic2[0] == 1){
+                acEv("resposta corrigida apos a reprovacao do indicador");
+                accFixed = accFixed + 1;
+                acCredit(b[2]);
+            } else {
+                acEv("a nova resposta ainda tem problema (" + ic2[2] + "): " + ic2[3]);
+                answer = answer + "\n\n[aviso dos indicadores: " + ic2[3] + "]";
+            }
+        } else {
+            answer = answer + "\n\n[aviso dos indicadores: " + ic[3] + "]";
+        }
+        accCaught = accCaught + 1;
+        accErrSinceForge = accErrSinceForge + 1;
+        acArchive("[" + MADREPORITO.madShort(MADREPORITO.madOneLine(question), 50) + "] erro: " + ic[3] + " -> correcao: " + ic[4]);
+    } else {
+        for(var sg = 0; sg < len(active); sg++){
+            SKILLS.skFeedback(active[sg], 0.03);
+        }
+    }
+    out[0] = 1;
+    out[1] = answer;
+    return out;
+}
+
+// ------------------------------------------------------------------ agente
+
+// Agente: a LLM local (ferramenta 13, rodando em um braço executor) decide a próxima ação;
+// as ferramentas rodam em braços. Protocolo: "TOOL ferramenta:arg" ou "FINAL resposta".
+// A resposta final passa por um revisor (uma vez); se houver erro, o agente corrige.
+function acAgent(var goal){
+    var ctxTok = CANAL.canalCtx();
+    var maxSteps = DESENVOLVIMENTO.devAgentSteps();
+    var rules = CONTEXTO.ctxRecall(floor(DESENVOLVIMENTO.devLessonChars(ctxTok) / 2), goal);
+    var hdr = "Voce e o agente Starfish. Ferramentas: read:<arquivo>, write:<texto>, http:<url localhost>, echo:<texto>, ask:<pergunta>, gen:<objetivo> (texto longo revisado), skill:list, mem:find <palavra>. Responda com UMA linha: 'TOOL ferramenta:argumento' para agir ou 'FINAL resposta' para terminar.\n";
+    if (rules != ""){
+        hdr = hdr + "REGRAS APRENDIDAS:\n" + rules;
+    }
+    hdr = hdr + "Objetivo: " + goal;
+    var histBudget = DESENVOLVIMENTO.devHistoryChars(ctxTok) - len(stringToChars(hdr));
+    if (histBudget < 1000){ histBudget = 1000; }
+    var obsMax = floor(histBudget / 6);
+    if (obsMax > 3000){ obsMax = 3000; }
+
+    var trace = "";
+    var steps = 0;
+    var done = 0;
+    var reviewed = 0;
+    var answer = "";
+    var lastRay = -1;
+
+    while(done == 0 && steps < maxSteps){
+        steps = steps + 1;
+        var a = acRunOnArm(13, hdr + "\n" + MADREPORITO.madTail(trace, histBudget));
+        lastRay = a[2];
+        if (a[0] == 0){
+            answer = "agente falhou: " + a[1];
+            done = 2;
+        } else {
+            var full = MADREPORITO.madTrimFrom(MADREPORITO.madOutput(a[1]), 0);
+            var reply = MADREPORITO.madFirstLine(full);
+            if (MADREPORITO.madStarts(reply, "TOOL") == 1){
+                var call = MADREPORITO.madParse(MADREPORITO.madTrimFrom(reply, 4));
+                var obs = "ferramenta invalida";
+                if (call[0] == 6){
+                    var sub = acGenerate(call[1], "");
+                    obs = MADREPORITO.madClean(sub[1], obsMax);
+                } else {
+                    var okTool = 0;
+                    if (call[0] >= 0 && call[0] <= 4){ okTool = 1; }
+                    if (call[0] == 7 || call[0] == 8){ okTool = 1; }
+                    if (okTool == 1){
+                        var t = acRunOnArm(call[0], call[1]);
+                        obs = MADREPORITO.madClean(t[1], obsMax);
+                    }
+                }
+                trace = trace + "\n" + reply + "\nRESULTADO: " + obs;
+            } else {
+                var cand = full;
+                if (MADREPORITO.madStarts(reply, "FINAL") == 1){
+                    cand = MADREPORITO.madTrimFrom(full, 5);
+                }
+                var accept = 1;
+                if (reviewed == 0 && steps < maxSteps){
+                    reviewed = 1;
+                    var v = acReview(goal, cand, "", rules);
+                    if (v[0] == 0){
+                        accept = 0;
+                        accCaught = accCaught + 1;
+                        accErrSinceForge = accErrSinceForge + 1;
+                        acEv("PARADA no agente: " + acWho(v[4]) + " apontou erro na resposta final: " + v[2]);
+                        acPenalize(lastRay, 13, v[1], v[2]);
+                        acArchive("[" + MADREPORITO.madShort(MADREPORITO.madOneLine(goal), 50) + "] erro: " + v[2] + " -> correcao: " + v[3]);
+                        trace = trace + "\n" + reply + "\nREVISOR: resposta reprovada (" + v[2] + "). Corrija assim: " + v[3] + " e responda de novo com FINAL.";
+                    }
+                }
+                if (accept == 1){
+                    answer = cand;
+                    done = 1;
+                }
+            }
+        }
+    }
+    if (done == 0){
+        answer = "limite de passos atingido";
+    }
+    var out[] = {0, answer, lastRay, 5, ""};
+    if (done == 1){
+        out[0] = 1;
+    }
+    return out;
+}
+
+// ------------------------------------------------------------------ skills como ferramenta
+
+// skill:list | skill:show nome | skill:novo tema | skill:nome|tarefa
+function acSkillCmd(var arg){
+    var a = MADREPORITO.madTrim(arg);
+    var out[] = {0, "", -1, 7, ""};
+    if (a == "" || a == "list" || MADREPORITO.madStarts(a, "show") == 1){
+        var r = acRunOnArm(7, a);
+        out[0] = r[0];
+        out[1] = r[1];
+        out[2] = r[2];
+        return out;
+    }
+    if (MADREPORITO.madStarts(a, "novo") == 1){
+        var topic = MADREPORITO.madTrimFrom(a, 4);
+        if (topic == ""){
+            out[1] = "uso: skill:novo <tema>";
+            return out;
+        }
+        var nm = acForge("TEMA SOLICITADO PELO USUARIO: " + topic + "\nLicoes recentes:\n" + CONTEXTO.ctxLast(6));
+        if (nm == ""){
+            out[1] = "o ferreiro nao conseguiu criar a skill";
+            return out;
+        }
+        out[0] = 1;
+        out[1] = "skill criada: " + nm + "\n" + SKILLS.skInstrOf(nm);
+        return out;
+    }
+    var parts = MADREPORITO.madSplit(a, 124);
+    var name = MADREPORITO.madSlug(parts[0], 40);
+    var task = "";
+    for(var i = 1; i < len(parts); i++){
+        if (i > 1){ task = task + "|"; }
+        task = task + parts[i];
+    }
+    task = MADREPORITO.madTrim(task);
+    if (SKILLS.skFind(name) == -1){
+        out[1] = "skill inexistente: " + name + " (veja skill:list)";
+        return out;
+    }
+    if (task == ""){
+        out[1] = "uso: skill:" + name + "|<tarefa>";
+        return out;
+    }
+    return acGenerate(task, name);
+}
+
+// ------------------------------------------------------------------ pipeline de uma tarefa
+
+// fecha uma tarefa de laço próprio (gen/agent/skill): XP, manutenção, eventos
+function acFinishSpecial(var routed){
+    if (routed[0] == 1){
+        acGain(1);
+    }
+    acMaintain();
+    routed[1] = MADREPORITO.madOutput(routed[1]);
+    routed[4] = accEvents;
+    accProgress = "ocioso";
+    INTERRADII.interProgress("ocioso");
+    return routed;
+}
+
+// Sense -> Decide -> Act (com retry), depois aprende; gen/agent/skill têm laços próprios.
+// retorna {ok, texto, braço, ferramenta, eventos}
+function acProcess(var raw){
+    accEvents = "";
+    var pre = MADREPORITO.madIntake(raw);
+    if (pre != ""){
+        var p0 = MADREPORITO.madParse(pre);
+        if (p0[0] == 5){
+            var ra = acAgent(p0[1]);
+            return acFinishSpecial(ra);
+        }
+        if (p0[0] == 4){
+            if (p0[1] == ""){
+                var rq[] = {0, "uso: ask:<pergunta>", -1, 4, ""};
+                return acFinishSpecial(rq);
+            }
+            var rk = acAsk(p0[1]);
+            return acFinishSpecial(rk);
+        }
+        if (p0[0] == 6){
+            if (p0[1] == ""){
+                var rg[] = {0, "uso: gen:<objetivo>", -1, 6, ""};
+                return acFinishSpecial(rg);
+            }
+            var rr = acGenerate(p0[1], "");
+            return acFinishSpecial(rr);
+        }
+        if (p0[0] == 7){
+            var rs = acSkillCmd(p0[1]);
+            return acFinishSpecial(rs);
+        }
+    }
+
+    var clean = "";
+    var toolId = -1;
+    var arg = "";
+    var rayIdx = -1;
+    var outText = "";
+    var ok = false;
+    var acted = 0;
+    var errMsg = "";
+
+    try {
+        Nodes Pipeline {
+            Sense() {
+                clean = MADREPORITO.madIntake(raw);
+                if (clean == "") {
+                    errMsg = "tarefa vazia";
+                    Fail();
+                }
+                var p = MADREPORITO.madParse(clean);
+                toolId = p[0];
+                arg = p[1];
+                if (toolId == -1) {
+                    errMsg = "ferramenta desconhecida (use read, write, http, echo, ask, agent, gen, skill ou mem)";
+                    Fail();
+                }
+            };
+
+            Decide(Sense) {
+                rayIdx = acPickArm(toolId, -1);
+                if (rayIdx == -1) {
+                    errMsg = "nenhum braco vivo apto para ferramenta " + toolId;
+                    Fail();
+                }
+            };
+
+            Act(Decide) -> OnFail(Retry = 2) {
+                acted = 1;
+                try {
+                    outText = CANAL.canalCarry(PentaRadii[rayIdx], toolId, arg);
+                    ok = true;
+                } catch(var e) {
+                    ok = false;
+                    errMsg = e;
+                    Fail();
+                }
+            };
+        }
+    } catch(var pipeErr) {
+        ok = false;
+        if (errMsg == "") {
+            errMsg = pipeErr;
+        }
+    }
+
+    if (acted == 1 && rayIdx != -1) {
+        var okN = 0;
+        if (ok) { okN = 1; }
+        acLearn(rayIdx, toolId, okN);
+    }
+
+    var res[] = {0, "", rayIdx, toolId, ""};
+    if (ok) {
+        res[0] = 1;
+        res[1] = MADREPORITO.madOutput(outText);
+        acGain(1);
+    } else {
+        if (errMsg == "") { errMsg = "falha desconhecida"; }
+        res[1] = MADREPORITO.madOutput(errMsg);
+    }
+    acMaintain();
+    res[4] = accEvents;
+    return res;
+}
+
+// ------------------------------------------------------------------ relatórios
+
+function acStatus(){
+    var s = "";
+    for(var i = 0; i < len(PentaRadii); i++){
+        var r = PentaRadii[i];
+        var mark = "x";
+        if (r.alive == 1){ mark = "+"; }
+        s = s + "R" + i + Radii.RoleLetter(r.role) + mark + "g" + r.generation + "(ok " + r.successes + "/falha " + r.failures + "/dor " + floor(r.pain * 10) / 10 + "/pts- " + r.strikes + "/cred " + r.credits + ") ";
+    }
+    return s;
+}
+
+function acSummary(){
+    var ctxTok = CANAL.canalCtx();
+    return DESENVOLVIMENTO.devSummary(ctxTok) + " | " + len(PentaRadii) + " bracos | " + CONTEXTO.ctxCount() + " licoes (" + CONTEXTO.ctxSize() + " bytes) | " + SKILLS.skCount() + " skills | erros pegos " + accCaught + ", corrigidos " + accFixed + ", bracos regenerados " + accRegens + ", alarmes falsos " + accFalseAlarms + ", skills criadas " + accForged;
+}
+
+function acSkillsReport(){
+    return SKILLS.skList();
+}
+
+function acContextReport(){
+    return CONTEXTO.ctxDump(40);
+}
+
+function acProgress(){
+    return accProgress;
+}
+
+function acLevel(){
+    return DESENVOLVIMENTO.devLevel();
+}
+
+function acPace(var pending){
+    return INTERRADII.interPace(pending);
+}
+
+Bundle ACC{
+    acInit();
+    acProcess();
+    acTick();
+    acStatus();
+    acSummary();
+    acSkillsReport();
+    acContextReport();
+    acLevel();
+    acProgress();
+    acPace();
+}

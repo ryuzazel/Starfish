@@ -1,0 +1,470 @@
+// Filtro de entrada/Saída de informação antes de ir ao Anel Circular Central (ACC)
+// Entrada: "ferramenta:argumento"
+//   read:a.txt | write:texto | http:http://localhost:7070/health | echo:oi
+//   ask:pergunta        -> uma chamada direta ao modelo local (llama.cpp)
+//   agent:objetivo      -> agente com ferramentas (loop de vários passos, cresce com o nível)
+//   gen:objetivo        -> resposta LONGA em partes; um braço Revisor confere cada parte
+//   skill:list          -> lista as skills aprendidas
+//   skill:novo tema     -> o Ferreiro cria uma skill nova sobre o tema
+//   skill:nome|tarefa   -> executa a tarefa usando a skill (com revisão)
+//   mem:list | mem:add lição | mem:find palavra -> contexto (memória) do Starfish
+// Sem ':' vira echo.
+//
+// Este arquivo também é a "caixa de ferramentas" de texto do Starfish (a linguagem CnR
+// não tem funções de string prontas): indexOf, substring, split, trim, upper, etc.
+
+var madMaxIn = 4000;      // era 500
+var madMaxOut = 60000;    // era 1000: respostas longas cabem
+
+// ---------------------------------------------------------------- limpeza
+
+// remove caracteres de controle (mantém \n) e corta no tamanho máximo (em bytes),
+// sem partir um caractere UTF-8 ao meio
+function madClean(var raw, var maxLen){
+    var codes = stringToChars(raw);
+    var[] kept;
+    var i = 0;
+    while(i < len(codes) && len(kept) < maxLen){
+        var c = codes[i];
+        if (c >= 32 || c == 10){
+            kept.push(c);
+        }
+        i = i + 1;
+    }
+    if (i < len(codes) && codes[i] >= 128 && codes[i] < 192){
+        // houve corte no meio de um caractere multibyte: descarta o pedaço
+        var cut = 1;
+        while(cut == 1 && len(kept) > 0){
+            var last = kept[len(kept) - 1];
+            if (last >= 128 && last < 192){
+                kept.pop();
+            } else {
+                if (last >= 192){
+                    kept.pop();
+                }
+                cut = 0;
+            }
+        }
+    }
+    if (len(kept) == 0){
+        return "";
+    }
+    return charsToString(kept);
+}
+
+function madIntake(var raw){
+    return madClean((string)raw, madMaxIn);
+}
+
+function madOutput(var result){
+    return madClean((string)result, madMaxOut);
+}
+
+// ---------------------------------------------------------------- strings
+
+function madStarts(var s, var prefix){
+    var a = stringToChars(s);
+    var b = stringToChars(prefix);
+    if (len(a) < len(b)){
+        return 0;
+    }
+    for(var i = 0; i < len(b); i++){
+        if (a[i] != b[i]){
+            return 0;
+        }
+    }
+    return 1;
+}
+
+// primeiro índice de `sub` em `s` a partir de `from`; -1 se não achar
+function madIndexOf(var s, var sub, var from){
+    var a = stringToChars(s);
+    var b = stringToChars(sub);
+    var n = len(b);
+    if (n == 0){
+        return -1;
+    }
+    var i = from;
+    if (i < 0){ i = 0; }
+    while(i + n <= len(a)){
+        var ok = 1;
+        var j = 0;
+        while(j < n && ok == 1){
+            if (a[i + j] != b[j]){
+                ok = 0;
+            }
+            j = j + 1;
+        }
+        if (ok == 1){
+            return i;
+        }
+        i = i + 1;
+    }
+    return -1;
+}
+
+// minúsculas/maiúsculas ASCII (acentos ficam como estão)
+function madUpper(var s){
+    var a = stringToChars(s);
+    var[] o;
+    for(var i = 0; i < len(a); i++){
+        var c = a[i];
+        if (c >= 97 && c <= 122){
+            c = c - 32;
+        }
+        o.push(c);
+    }
+    if (len(o) == 0){
+        return "";
+    }
+    return charsToString(o);
+}
+
+function madLower(var s){
+    var a = stringToChars(s);
+    var[] o;
+    for(var i = 0; i < len(a); i++){
+        var c = a[i];
+        if (c >= 65 && c <= 90){
+            c = c + 32;
+        }
+        o.push(c);
+    }
+    if (len(o) == 0){
+        return "";
+    }
+    return charsToString(o);
+}
+
+// contém `sub` ignorando maiúsculas/minúsculas?
+function madHas(var s, var sub){
+    if (madIndexOf(madUpper(s), madUpper(sub), 0) >= 0){
+        return 1;
+    }
+    return 0;
+}
+
+// bytes [from, to) de s (cortes seguros em UTF-8)
+function madSub(var s, var from, var to){
+    var a = stringToChars(s);
+    var f = from;
+    var t = to;
+    if (f < 0){ f = 0; }
+    if (t > len(a)){ t = len(a); }
+    // não começa no meio de um caractere
+    while(f < t && a[f] >= 128 && a[f] < 192){
+        f = f + 1;
+    }
+    // não termina no meio de um caractere
+    if (t < len(a)){
+        while(t > f && a[t] >= 128 && a[t] < 192){
+            t = t - 1;
+        }
+    }
+    var[] o;
+    for(var i = f; i < t; i++){
+        o.push(a[i]);
+    }
+    if (len(o) == 0){
+        return "";
+    }
+    return charsToString(o);
+}
+
+function madHead(var s, var n){
+    return madSub(s, 0, n);
+}
+
+// os últimos n bytes de s
+function madTail(var s, var n){
+    var total = len(stringToChars(s));
+    if (total <= n){
+        return s;
+    }
+    return madSub(s, total - n, total);
+}
+
+// "a...z" quando s passa de n bytes (para logs e resumos)
+function madShort(var s, var n){
+    if (len(stringToChars(s)) <= n){
+        return s;
+    }
+    return madHead(s, n) + "...";
+}
+
+// devolve s a partir do índice `from`, pulando espaços/quebras/':' iniciais
+function madTrimFrom(var s, var from){
+    var codes = stringToChars(s);
+    var i = from;
+    while(i < len(codes) && (codes[i] <= 32 || codes[i] == 58)){
+        i = i + 1;
+    }
+    var[] rest;
+    while(i < len(codes)){
+        rest.push(codes[i]);
+        i = i + 1;
+    }
+    if (len(rest) == 0){
+        return "";
+    }
+    return charsToString(rest);
+}
+
+// tira espaços/quebras das duas pontas
+function madTrim(var s){
+    var codes = stringToChars(s);
+    var i = 0;
+    var j = len(codes);
+    while(i < j && codes[i] <= 32){
+        i = i + 1;
+    }
+    while(j > i && codes[j - 1] <= 32){
+        j = j - 1;
+    }
+    if (j <= i){
+        return "";
+    }
+    var[] o;
+    for(var k = i; k < j; k++){
+        o.push(codes[k]);
+    }
+    return charsToString(o);
+}
+
+function madFirstLine(var s){
+    var codes = stringToChars(s);
+    var[] line;
+    var i = 0;
+    while(i < len(codes) && codes[i] != 10 && codes[i] != 13){
+        line.push(codes[i]);
+        i = i + 1;
+    }
+    if (len(line) == 0){
+        return "";
+    }
+    return charsToString(line);
+}
+
+// divide s no caractere de código `delim` (ex.: 10 = quebra de linha, 124 = '|')
+function madSplit(var s, var delim){
+    var codes = stringToChars(s);
+    var[] parts;
+    var[] cur;
+    for(var i = 0; i < len(codes); i++){
+        if (codes[i] == delim){
+            if (len(cur) == 0){
+                parts.push("");
+            } else {
+                parts.push(charsToString(cur));
+            }
+            while(len(cur) > 0){
+                cur.pop();
+            }
+        } else {
+            cur.push(codes[i]);
+        }
+    }
+    if (len(cur) == 0){
+        parts.push("");
+    } else {
+        parts.push(charsToString(cur));
+    }
+    return parts;
+}
+
+// troca quebras de linha e '|' por espaço/'/' (para guardar em uma linha de arquivo)
+function madOneLine(var s){
+    var codes = stringToChars(s);
+    var[] o;
+    for(var i = 0; i < len(codes); i++){
+        var c = codes[i];
+        if (c == 10 || c == 13 || c == 9){
+            c = 32;
+        }
+        if (c == 124){
+            c = 47;
+        }
+        o.push(c);
+    }
+    if (len(o) == 0){
+        return "";
+    }
+    return madTrim(charsToString(o));
+}
+
+// nome seguro: minúsculas, dígitos e '-' (resto vira '-'), até n bytes
+function madSlug(var s, var n){
+    var codes = stringToChars(madLower(s));
+    var[] o;
+    var prevDash = 1;
+    for(var i = 0; i < len(codes) && len(o) < n; i++){
+        var c = codes[i];
+        var ok = 0;
+        if (c >= 97 && c <= 122){ ok = 1; }
+        if (c >= 48 && c <= 57){ ok = 1; }
+        if (ok == 1){
+            o.push(c);
+            prevDash = 0;
+        } else {
+            if (prevDash == 0){
+                o.push(45);
+                prevDash = 1;
+            }
+        }
+    }
+    while(len(o) > 0 && o[len(o) - 1] == 45){
+        o.pop();
+    }
+    if (len(o) == 0){
+        return "";
+    }
+    return charsToString(o);
+}
+
+// inteiro dos dígitos iniciais de s (depois de espaços); 0 se não houver
+function madNum(var s){
+    var codes = stringToChars(s);
+    var i = 0;
+    while(i < len(codes) && codes[i] <= 32){
+        i = i + 1;
+    }
+    var n = 0;
+    while(i < len(codes) && codes[i] >= 48 && codes[i] <= 57){
+        n = n * 10 + (codes[i] - 48);
+        i = i + 1;
+    }
+    return n;
+}
+
+// primeiro dígito 0-9 encontrado em s (-1 se nenhum)
+function madFirstDigit(var s){
+    var codes = stringToChars(s);
+    for(var i = 0; i < len(codes); i++){
+        if (codes[i] >= 48 && codes[i] <= 57){
+            return codes[i] - 48;
+        }
+    }
+    return -1;
+}
+
+// palavras "de conteúdo" (4+ letras/dígitos), minúsculas, sem repetição, no máximo n
+function madWords(var s, var n){
+    var codes = stringToChars(madLower(s));
+    var[] words;
+    var[] cur;
+    for(var i = 0; i <= len(codes); i++){
+        var c = 0;
+        if (i < len(codes)){ c = codes[i]; }
+        var isWord = 0;
+        if (c >= 97 && c <= 122){ isWord = 1; }
+        if (c >= 48 && c <= 57){ isWord = 1; }
+        if (c >= 128){ isWord = 1; }
+        if (isWord == 1){
+            cur.push(c);
+        } else {
+            if (len(cur) >= 4){
+                var w = charsToString(cur);
+                var seen = 0;
+                for(var q = 0; q < len(words); q++){
+                    if (words[q] == w){
+                        seen = 1;
+                    }
+                }
+                if (seen == 0 && len(words) < n){
+                    words.push(w);
+                }
+            }
+            while(len(cur) > 0){
+                cur.pop();
+            }
+        }
+    }
+    return words;
+}
+
+// quantas palavras de `words` aparecem em `text` (relevância simples)
+function madOverlap(var words, var text){
+    var low = madLower(text);
+    var hits = 0;
+    for(var i = 0; i < len(words); i++){
+        if (madIndexOf(low, words[i], 0) >= 0){
+            hits = hits + 1;
+        }
+    }
+    return hits;
+}
+
+// ---------------------------------------------------------------- ferramentas
+
+// devolve {toolId, arg}; toolId = -1 se a ferramenta não existe
+// ids: 0 read, 1 write, 2 http, 3 echo, 4 ask, 5 agent, 6 gen, 7 skill, 8 mem
+function madParse(var clean){
+    var codes = stringToChars(clean);
+    var colon = -1;
+    var i = 0;
+    while(i < len(codes) && colon == -1){
+        if (codes[i] == 58){
+            colon = i;
+        }
+        i = i + 1;
+    }
+    var res[] = {3, clean};
+    if (colon == -1){
+        return res;
+    }
+    var[] hd;
+    var[] tl;
+    for(var j = 0; j < colon; j++){
+        hd.push(codes[j]);
+    }
+    for(var j = colon + 1; j < len(codes); j++){
+        tl.push(codes[j]);
+    }
+    var name = "";
+    if (len(hd) > 0){
+        name = charsToString(hd);
+    }
+    var arg = "";
+    if (len(tl) > 0){
+        arg = charsToString(tl);
+    }
+    var id = -1;
+    if (name == "read"){ id = 0; }
+    if (name == "write"){ id = 1; }
+    if (name == "http"){ id = 2; }
+    if (name == "echo"){ id = 3; }
+    if (name == "ask"){ id = 4; }
+    if (name == "agent"){ id = 5; }
+    if (name == "gen"){ id = 6; }
+    if (name == "skill"){ id = 7; }
+    if (name == "mem"){ id = 8; }
+    res[0] = id;
+    res[1] = madTrim(arg);
+    return res;
+}
+
+Bundle MADREPORITO{
+    madIntake();
+    madOutput();
+    madParse();
+    madClean();
+    madStarts();
+    madIndexOf();
+    madUpper();
+    madLower();
+    madHas();
+    madSub();
+    madHead();
+    madTail();
+    madShort();
+    madTrimFrom();
+    madTrim();
+    madFirstLine();
+    madSplit();
+    madOneLine();
+    madSlug();
+    madNum();
+    madFirstDigit();
+    madWords();
+    madOverlap();
+}

@@ -1,0 +1,242 @@
+//Ferramentas atuadoras de cada braço, é o MCP
+// ids de ferramenta:
+//   0 read, 1 write, 2 http, 3 echo, 4 ask (llama.cpp local)      -> executor
+//   6 gen   (uma PARTE de uma resposta longa)                    -> executor
+//   13 think (um passo do agente)                                -> executor
+//   9 review (conferir um trecho)                                -> revisor
+//   7 skill (listar/mostrar skills), 8 mem (contexto), 12 compact -> arquivista
+//   10 forge (criar skill)                                       -> ferreiro
+//   11 plan (roteiro de um objetivo grande)                      -> planejador
+// Sandbox: leitura/escrita só dentro de starfish_workspace/ (crie a pasta), HTTP só para localhost.
+//
+// IA local via llama.cpp (builtins llamaStart/llamaConnect/llamaAsk do interpretador CnR):
+//   * Se existir o arquivo ambModelPath (um .gguf), o Starfish sobe o `llama-server` sozinho
+//     (binário: variável de ambiente LLAMA_SERVER_BIN, ou `llama-server` no PATH).
+//   * Senão, conecta em um llama-server já rodando em ambLlamaUrl
+//     (ou na URL da variável de ambiente LLAMA_SERVER_URL).
+//   * Se nada disso existir, o Starfish continua de pé; só as ferramentas de modelo falham.
+
+Gather(Bundle MADREPORITO){}
+Gather(Bundle CONTEXTO){}
+Gather(Bundle SKILLS){}
+
+var ambWorkspace = "starfish_workspace/";
+var ambModelPath = "models/model.gguf";   // coloque aqui o seu modelo GGUF
+var ambLlamaPort = 8080;
+// Janela de contexto do modelo (tokens). ESTE NÚMERO MANDA em todos os orçamentos do Starfish:
+// tokens por parte, tamanho do contexto injetado, histórico do agente. Mantenha igual ao -c abaixo.
+// Mais memória/GPU? suba (ex.: 32768 e "-c 32768 -ngl 99"). Pouca memória? desça (ex.: 8192).
+var ambCtxTokens = 16384;
+var ambLlamaArgs = "-c 16384";            // flags extras do llama-server (ex.: "-c 16384 -ngl 99")
+var ambLlamaUrl = "http://127.0.0.1:8080";
+var ambLlamaMaxTokens = 2048;             // `ask:` direto (era 512)
+var ambSegTokens = 1024;                  // tokens de uma parte do `gen:`; o ACC ajusta pelo nível
+
+var ambLlamaSystem = "Voce e o cerebro de um agente chamado Starfish. Responda com precisao e completude; seja breve apenas quando a pergunta for simples.";
+var ambSysAgente = "[AGENTE] Voce e o agente Starfish. Decida a proxima acao. Responda sempre com UMA linha de decisao: 'TOOL ferramenta:argumento' ou 'FINAL resposta completa'.";
+var ambSysGerador = "[GERADOR] Voce e o braco EXECUTOR do Starfish e escreve respostas longas e tecnicamente corretas, em partes. Regras: (1) escreva SOMENTE o texto da parte pedida, sem comentar o que esta fazendo; (2) continue exatamente de onde o texto anterior parou, sem repetir nem recomecar; (3) siga o ROTEIRO, as REGRAS e as CORRECOES recebidas; (4) so afirme o que voce tem razao para considerar verdadeiro e confira numeros e codigo; (5) quando o texto estiver COMPLETO, termine com a marca [FIM] em uma linha final; nao escreva [FIM] antes disso.";
+var ambSysRevisor = "[REVISOR] Voce e o braco REVISOR do Starfish e confere o TRECHO contra o OBJETIVO. Procure: afirmacoes falsas ou inventadas (fatos, definicoes, termos tecnicos, anatomia, datas, numeros), contradicoes, contas erradas, codigo que nao funciona, e desrespeito as REGRAS. Procedimento: (1) em ate 4 frases curtas, aponte as afirmacoes mais arriscadas do trecho e diga se cada uma esta correta; (2) termine com UMA ultima linha: 'VEREDITO: OK' ou 'VEREDITO: ERRO <gravidade 1-3> | <o que esta errado> | <como corrigir>'. Gravidade 1 = leve, 2 = relevante, 3 = grave (inventado ou inutilizavel). Seja criterioso: se voce sabe que uma afirmacao esta errada, e ERRO. Trecho cortado no meio de uma frase NAO e erro. Sem erro que voce consiga apontar, VEREDITO: OK.";
+var ambSysPlanejador = "[PLANEJADOR] Voce e o braco PLANEJADOR do Starfish. Para o OBJETIVO dado, liste de 3 a 8 topicos numerados na ordem em que devem ser escritos, um por linha, sem explicacoes.";
+var ambSysFerreiro = "[FERREIRO] Voce e o braco FERREIRO do Starfish e cria SKILLS: regras curtas e reutilizaveis que evitam erros repetidos. Responda SOMENTE com uma linha no formato: nome-curto-em-minusculas | instrucao imperativa de ate 300 caracteres.";
+var ambSysArquivista = "[ARQUIVISTA] Voce e o braco ARQUIVISTA do Starfish. Condense as LICOES recebidas mantendo as regras mais importantes e removendo duplicatas. Responda com uma licao por linha, sem numeracao e sem comentarios.";
+
+function ambStartsWith(var s, var prefix){
+    var a = stringToChars(s);
+    var b = stringToChars(prefix);
+    if (len(a) < len(b)){
+        return 0;
+    }
+    for(var i = 0; i < len(b); i++){
+        if (a[i] != b[i]){
+            return 0;
+        }
+    }
+    return 1;
+}
+
+function ambHasDots(var s){
+    var c = stringToChars(s);
+    for(var i = 0; i + 1 < len(c); i++){
+        if (c[i] == 46 && c[i+1] == 46){
+            return 1;
+        }
+    }
+    return 0;
+}
+
+// ids das ferramentas "de mão" (o que um executor sabe operar no começo)
+function ambToolList(){
+    var t[] = {0,1,2,3,4,6,13};
+    return t;
+}
+
+// janela de contexto (tokens) configurada: base dos orçamentos do ACC
+function ambCtx(){
+    return ambCtxTokens;
+}
+
+// o ACC ajusta quantos tokens uma parte do `gen:` pode ter (cresce com o nível)
+function ambSetTokens(var n){
+    var v = n;
+    if (v < 64){ v = 64; }
+    if (v > ambCtxTokens){ v = ambCtxTokens; }
+    ambSegTokens = v;
+}
+
+function ambRead(var arg){
+    if (ambHasDots(arg) == 1){
+        Throw("caminho invalido");
+    }
+    var path = ambWorkspace + arg;
+    if (fileExists(path)){
+        return readFile(path);
+    }
+    Throw("arquivo inexistente: " + arg);
+}
+
+function ambWrite(var arg){
+    appendFile(ambWorkspace + "notes.txt", arg + "\n");
+    return "anotado";
+}
+
+function ambHttp(var arg){
+    if (ambStartsWith(arg, "http://localhost") == 0 && ambStartsWith(arg, "http://127.0.0.1") == 0){
+        Throw("host nao permitido");
+    }
+    var r = Http.GET(arg);
+    return "status " + r.status + ": " + (string)r.body;
+}
+
+// modelos Qwen3 podem devolver o raciocínio em <think>...</think>; descarta tudo até o </think>
+function ambStripThink(var s){
+    var c = stringToChars(s);
+    var tag = stringToChars("</think>");
+    var n = len(tag);
+    var i = 0;
+    var cut = -1;
+    while(i + n <= len(c) && cut == -1){
+        var match = 1;
+        for(var j = 0; j < n; j++){
+            if (c[i + j] != tag[j]){
+                match = 0;
+            }
+        }
+        if (match == 1){
+            cut = i + n;
+        }
+        i = i + 1;
+    }
+    if (cut == -1){
+        return s;
+    }
+    var[] rest;
+    for(var q = cut; q < len(c); q++){
+        rest.push(c[q]);
+    }
+    if (len(rest) == 0){
+        return "";
+    }
+    return charsToString(rest);
+}
+
+// sobe/conecta o llama.cpp. Retorna uma mensagem de status (não derruba o Starfish se falhar).
+function ambBoot(){
+    try {
+        if (fileExists(ambModelPath)){
+            llamaStart(ambModelPath, ambLlamaPort, ambLlamaArgs, 300);
+            return "llama.cpp: modelo " + ambModelPath + " carregado na porta " + ambLlamaPort + " (contexto " + ambCtxTokens + " tokens)";
+        }
+        llamaConnect(ambLlamaUrl);
+        return "llama.cpp: usando llama-server em " + ambLlamaUrl + " (contexto assumido: " + ambCtxTokens + " tokens)";
+    } catch(var e) {
+        return "llama.cpp INDISPONIVEL (ferramentas de modelo vao falhar): " + e;
+    }
+}
+
+// chamada ao modelo com um prompt de sistema de papel. O raciocínio <think>...</think> é descartado.
+function ambModel(var prompt, var system, var maxTokens, var temp){
+    var txt = llamaAsk(prompt, system, maxTokens, temp);
+    return ambStripThink((string)txt);
+}
+
+// pergunta direta ao modelo local (ferramenta `ask:`)
+function ambAsk(var prompt){
+    return ambModel(prompt, ambLlamaSystem, ambLlamaMaxTokens, 0.3);
+}
+
+// ferramenta 7: skill:list | skill:show nome
+function ambSkillTool(var arg){
+    var a = MADREPORITO.madTrim(arg);
+    if (a == "" || a == "list"){
+        return SKILLS.skList();
+    }
+    if (MADREPORITO.madStarts(a, "show") == 1){
+        var nm = MADREPORITO.madTrimFrom(a, 4);
+        var s = SKILLS.skShow(nm);
+        if (s == ""){
+            Throw("skill inexistente: " + nm);
+        }
+        return s;
+    }
+    Throw("uso: skill:list | skill:show nome");
+}
+
+// ferramenta 8: mem:list | mem:add lição | mem:find palavra | mem:count
+function ambMemTool(var arg){
+    var a = MADREPORITO.madTrim(arg);
+    if (a == "" || a == "list"){
+        return CONTEXTO.ctxDump(40);
+    }
+    if (a == "count"){
+        return "" + CONTEXTO.ctxCount() + " licoes, " + CONTEXTO.ctxSize() + " caracteres";
+    }
+    if (MADREPORITO.madStarts(a, "learn") == 1){
+        // lição gerada pelo próprio Starfish (revisor -> arquivista), sem a marca [manual]
+        var auto = MADREPORITO.madTrimFrom(a, 5);
+        if (auto == ""){
+            Throw("mem:learn precisa de um texto");
+        }
+        if (CONTEXTO.ctxAdd(auto) == 0){
+            return "licao ja existia";
+        }
+        return "licao gravada";
+    }
+    if (MADREPORITO.madStarts(a, "add") == 1){
+        var lesson = MADREPORITO.madTrimFrom(a, 3);
+        if (lesson == ""){
+            Throw("mem:add precisa de um texto");
+        }
+        CONTEXTO.ctxAdd("[manual] " + lesson);
+        return "licao gravada";
+    }
+    if (MADREPORITO.madStarts(a, "find") == 1){
+        var q = MADREPORITO.madTrimFrom(a, 4);
+        return CONTEXTO.ctxRecall(4000, q);
+    }
+    Throw("uso: mem:list | mem:add licao | mem:find palavra | mem:count");
+}
+
+function ambRun(var id, var arg){
+    if (id == 0){ return ambRead(arg); }
+    if (id == 1){ return ambWrite(arg); }
+    if (id == 2){ return ambHttp(arg); }
+    if (id == 3){ return arg; }
+    if (id == 4){ return ambAsk(arg); }
+    if (id == 6){ return ambModel(arg, ambSysGerador, ambSegTokens, 0.5); }
+    if (id == 7){ return ambSkillTool(arg); }
+    if (id == 8){ return ambMemTool(arg); }
+    if (id == 9){ return ambModel(arg, ambSysRevisor, 500, 0.1); }
+    if (id == 10){ return ambModel(arg, ambSysFerreiro, 500, 0.4); }
+    if (id == 11){ return ambModel(arg, ambSysPlanejador, 500, 0.3); }
+    if (id == 12){ return ambModel(arg, ambSysArquivista, 1500, 0.2); }
+    if (id == 13){ return ambModel(arg, ambSysAgente, ambLlamaMaxTokens, 0.2); }
+    Throw("ferramenta desconhecida: " + id);
+}
+
+Bundle AMBULACRO{
+    ambToolList();
+    ambRun();
+    ambBoot();
+    ambCtx();
+    ambSetTokens();
+}

@@ -1,0 +1,56 @@
+//Espaço que liga Hemal Ring para o Braço (Ray)
+// O braço só executa o que está na Worklist do seu papel (executor, revisor, arquivista...).
+Gather(Bundle AMBULACRO){}
+
+function canalTools(){
+    return AMBULACRO.ambToolList();
+}
+
+// janela de contexto do modelo (tokens) e ajuste de tokens por parte: o ACC só conversa com o
+// Ambulacro por aqui
+function canalCtx(){
+    return AMBULACRO.ambCtx();
+}
+
+function canalSetTokens(var n){
+    AMBULACRO.ambSetTokens(n);
+}
+
+// liga o que os braços usam por fora (hoje: o modelo llama.cpp)
+function canalBoot(){
+    return AMBULACRO.ambBoot();
+}
+
+// O ACC entrega uma tarefa a um braço; o braço só executa o que está na sua Worklist.
+function canalCarry(var ray, var toolId, var arg){
+    if (ray.alive == 0){
+        Throw("braco morto");
+    }
+    var allowed = 0;
+    for(var i = 0; i < len(ray.Worklist); i++){
+        if (ray.Worklist[i] == toolId){
+            allowed = 1;
+        }
+    }
+    if (allowed == 0){
+        Throw("ferramenta fora da Worklist do braco");
+    }
+    ray.CurrentWork = toolId;
+    var res = "";
+    try {
+        res = AMBULACRO.ambRun(toolId, arg);
+    } catch(var e) {
+        ray.CurrentWork = -1;
+        Throw(e);
+    }
+    ray.CurrentWork = -1;
+    return res;
+}
+
+Bundle CANAL{
+    canalTools();
+    canalCarry();
+    canalBoot();
+    canalCtx();
+    canalSetTokens();
+}

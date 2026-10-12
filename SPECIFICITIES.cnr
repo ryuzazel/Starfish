@@ -1,0 +1,272 @@
+// SKILLS — a biblioteca de habilidades que o Starfish aprende sozinho.
+// O braço FERREIRO transforma erros repetidos em skills (regras curtas e reutilizáveis).
+// As skills relevantes entram no prompt do executor; cada resposta aprovada pelo Revisor dá
+// pontos a elas, cada erro tira pontos, e skill que só atrapalha é descartada.
+// Persistido em starfish_workspace/skills.txt, uma por linha: nome|nota|usos|instrução
+
+Gather(Bundle MADREPORITO){}
+Gather(Bundle INTERRADII){}
+
+var[] skNames;
+var[] skInstr;
+var[] skScore;
+var[] skUses;
+
+function skPath(){
+    return INTERRADII.interPath("skills.txt");
+}
+
+function skClear(){
+    while(len(skNames) > 0){ skNames.pop(); }
+    while(len(skInstr) > 0){ skInstr.pop(); }
+    while(len(skScore) > 0){ skScore.pop(); }
+    while(len(skUses) > 0){ skUses.pop(); }
+}
+
+function skSave(){
+    var s = "";
+    for(var i = 0; i < len(skNames); i++){
+        s = s + skNames[i] + "|" + skScore[i] + "|" + skUses[i] + "|" + skInstr[i] + "\n";
+    }
+    writeFile(skPath(), s);
+}
+
+function skInit(){
+    skClear();
+    var p = skPath();
+    if (fileExists(p)){
+        var lines = MADREPORITO.madSplit((string)readFile(p), 10);
+        for(var i = 0; i < len(lines); i++){
+            var parts = MADREPORITO.madSplit(lines[i], 124);
+            if (len(parts) >= 4 && MADREPORITO.madTrim(parts[0]) != ""){
+                skNames.push(MADREPORITO.madTrim(parts[0]));
+                skScore.push((Float)MADREPORITO.madTrim(parts[1]));
+                skUses.push(MADREPORITO.madNum(parts[2]));
+                skInstr.push(MADREPORITO.madTrim(parts[3]));
+            }
+        }
+    }
+    return len(skNames);
+}
+
+function skCount(){
+    return len(skNames);
+}
+
+function skFind(var name){
+    for(var i = 0; i < len(skNames); i++){
+        if (skNames[i] == name){
+            return i;
+        }
+    }
+    return -1;
+}
+
+function skRemove(var idx){
+    var[] n2;
+    var[] i2;
+    var[] s2;
+    var[] u2;
+    for(var i = 0; i < len(skNames); i++){
+        if (i != idx){
+            n2.push(skNames[i]);
+            i2.push(skInstr[i]);
+            s2.push(skScore[i]);
+            u2.push(skUses[i]);
+        }
+    }
+    skClear();
+    for(var k = 0; k < len(n2); k++){
+        skNames.push(n2[k]);
+        skInstr.push(i2[k]);
+        skScore.push(s2[k]);
+        skUses.push(u2[k]);
+    }
+}
+
+// cria (ou refina, se o nome já existe) uma skill. `maxSkills` é o limite do nível atual:
+// passando dele, a pior skill (menor nota) sai. Devolve o nome final ("" se inválida).
+function skAdd(var name, var instr, var maxSkills){
+    var nm = MADREPORITO.madSlug(name, 40);
+    var ins = MADREPORITO.madShort(MADREPORITO.madOneLine(instr), 400);
+    if (nm == "" || len(stringToChars(ins)) < 12){
+        return "";
+    }
+    var idx = skFind(nm);
+    if (idx != -1){
+        skInstr[idx] = ins;
+    } else {
+        skNames.push(nm);
+        skInstr.push(ins);
+        skScore.push(1);
+        skUses.push(0);
+        if (len(skNames) > maxSkills){
+            var worst = 0;
+            for(var i = 1; i < len(skNames) - 1; i++){
+                if (skScore[i] < skScore[worst]){
+                    worst = i;
+                }
+            }
+            skRemove(worst);
+        }
+    }
+    skSave();
+    return nm;
+}
+
+// escolhe até `maxN` skills mais relevantes para o objetivo (nota >= 0.3); devolve os nomes
+function skPick(var goal, var maxN){
+    var words = MADREPORITO.madWords(goal, 24);
+    var n = len(skNames);
+    var[] score;
+    var[] taken;
+    for(var i = 0; i < n; i++){
+        var sc = -1;
+        if (skScore[i] >= 0.3){
+            sc = MADREPORITO.madOverlap(words, skNames[i] + " " + skInstr[i]) * 10 + skScore[i] * 3;
+        }
+        score.push(sc);
+        taken.push(0);
+    }
+    var[] picked;
+    for(var r = 0; r < maxN; r++){
+        var best = -1;
+        var bestS = -1;
+        for(var j = 0; j < n; j++){
+            if (taken[j] == 0 && score[j] > bestS){
+                bestS = score[j];
+                best = j;
+            }
+        }
+        if (best != -1){
+            taken[best] = 1;
+            picked.push(skNames[best]);
+        }
+    }
+    return picked;
+}
+
+// TODAS as skills que cabem em `maxBytes`, das mais relevantes para o objetivo (e de maior nota)
+// para as menos; skills com nota < 0.3 ficam de fora. É o que entra por padrão em todo ask/gen.
+function skPickBudget(var goal, var maxBytes){
+    var words = MADREPORITO.madWords(goal, 24);
+    var n = len(skNames);
+    var[] score;
+    var[] taken;
+    for(var i = 0; i < n; i++){
+        var sc = -1;
+        if (skScore[i] >= 0.3){
+            sc = MADREPORITO.madOverlap(words, skNames[i] + " " + skInstr[i]) * 10 + skScore[i] * 3;
+        }
+        score.push(sc);
+        taken.push(0);
+    }
+    var[] picked;
+    var used = 0;
+    var go = 1;
+    while(go == 1){
+        var best = -1;
+        var bestS = -1;
+        for(var j = 0; j < n; j++){
+            if (taken[j] == 0 && score[j] > bestS){
+                bestS = score[j];
+                best = j;
+            }
+        }
+        if (best == -1){
+            go = 0;
+        } else {
+            taken[best] = 1;
+            var size = len(stringToChars(skNames[best] + skInstr[best])) + 6;
+            if (used + size <= maxBytes){
+                picked.push(skNames[best]);
+                used = used + size;
+            }
+        }
+    }
+    return picked;
+}
+
+// bloco de texto "- nome: instrução" para os nomes dados
+function skBlock(var names){
+    var s = "";
+    for(var i = 0; i < len(names); i++){
+        var idx = skFind(names[i]);
+        if (idx != -1){
+            s = s + "- " + skNames[idx] + ": " + skInstr[idx] + "\n";
+        }
+    }
+    return s;
+}
+
+function skInstrOf(var name){
+    var idx = skFind(name);
+    if (idx == -1){
+        return "";
+    }
+    return skInstr[idx];
+}
+
+// pontos para (delta > 0) ou contra (delta < 0) uma skill depois de usada.
+// Devolve 1 se a skill foi descartada por só atrapalhar (nota < 0.25 com 4+ usos).
+function skFeedback(var name, var delta){
+    var idx = skFind(name);
+    if (idx == -1){
+        return 0;
+    }
+    var v = skScore[idx] + delta;
+    if (v < 0){ v = 0; }
+    if (v > 2){ v = 2; }
+    skScore[idx] = v;
+    skUses[idx] = skUses[idx] + 1;
+    if (v < 0.25 && skUses[idx] >= 4){
+        skRemove(idx);
+        skSave();
+        return 1;
+    }
+    skSave();
+    return 0;
+}
+
+function skNamesLine(){
+    var s = "";
+    for(var i = 0; i < len(skNames); i++){
+        if (i > 0){ s = s + ", "; }
+        s = s + skNames[i];
+    }
+    return s;
+}
+
+function skList(){
+    if (len(skNames) == 0){
+        return "(nenhuma skill ainda; o Ferreiro cria skills a partir dos erros)";
+    }
+    var s = "";
+    for(var i = 0; i < len(skNames); i++){
+        s = s + skNames[i] + " (nota " + skScore[i] + ", " + skUses[i] + " usos): " + skInstr[i] + "\n";
+    }
+    return s;
+}
+
+function skShow(var name){
+    var idx = skFind(MADREPORITO.madSlug(name, 40));
+    if (idx == -1){
+        return "";
+    }
+    return skNames[idx] + " (nota " + skScore[idx] + ", " + skUses[idx] + " usos)\n" + skInstr[idx];
+}
+
+Bundle SKILLS{
+    skInit();
+    skCount();
+    skFind();
+    skAdd();
+    skPick();
+    skPickBudget();
+    skBlock();
+    skInstrOf();
+    skFeedback();
+    skNamesLine();
+    skList();
+    skShow();
+}
