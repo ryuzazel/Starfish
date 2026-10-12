@@ -16,7 +16,7 @@
 ---
 
 ## Contents
-For Examples look at [EXAMPLES.md](EXAMPLES.md)
+For Examples look at [EXAMPLES.sh](EXAMPLES.sh)
 
 - [Overview](#overview)
 - [Biological model](#biological-model)
