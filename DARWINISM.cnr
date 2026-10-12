@@ -119,12 +119,17 @@ function devTarget(var rl){
         if (devLvl >= 2){ return 1; }
         return 0;
     }
+    // pesquisador, programador e operador: um de cada desde a larva
+    // (para liberar por nivel: if (devLvl >= 3){ return 1; } return 0; e tire o papel de roleInit em RAY.cnr)
+    if (rl == 5 || rl == 6 || rl == 7){
+        return 1;
+    }
     return 0;
 }
 
 function devMaxArms(){
     var n = 0;
-    for(var r = 0; r < 5; r++){
+    for(var r = 0; r < 8; r++){
         n = n + devTarget(r);
     }
     return n;
@@ -151,7 +156,7 @@ function devMaxSegs(){
 }
 
 function devAgentSteps(){
-    return devByLevel(4, 6, 8, 10, 12);
+    return devByLevel(6, 8, 10, 14, 18);
 }
 
 // quantas vezes uma parte reprovada pode ser regenerada

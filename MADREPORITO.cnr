@@ -8,6 +8,9 @@
 //   skill:novo tema     -> o Ferreiro cria uma skill nova sobre o tema
 //   skill:nome|tarefa   -> executa a tarefa usando a skill (com revisão)
 //   mem:list | mem:add lição | mem:find palavra -> contexto (memória) do Starfish
+//   web:url | search:consulta | research:pergunta -> braço pesquisador (web publica)
+//   code:objetivo       -> programador escreve, operador roda, o erro volta ao programador
+//   save:nome.ext|texto | sh:comando | run:arquivo -> arquivos e comandos no sandbox
 // Sem ':' vira echo.
 //
 // Este arquivo também é a "caixa de ferramentas" de texto do Starfish (a linguagem CnR
@@ -397,7 +400,8 @@ function madOverlap(var words, var text){
 // ---------------------------------------------------------------- ferramentas
 
 // devolve {toolId, arg}; toolId = -1 se a ferramenta não existe
-// ids: 0 read, 1 write, 2 http, 3 echo, 4 ask, 5 agent, 6 gen, 7 skill, 8 mem
+// ids: 0 read, 1 write, 2 http, 3 echo, 4 ask, 5 agent, 6 gen, 7 skill, 8 mem,
+//      14 web, 15 search, 16 code, 17 save, 18 sh, 19 run, 20 research
 function madParse(var clean){
     var codes = stringToChars(clean);
     var colon = -1;
@@ -438,6 +442,13 @@ function madParse(var clean){
     if (name == "gen"){ id = 6; }
     if (name == "skill"){ id = 7; }
     if (name == "mem"){ id = 8; }
+    if (name == "web"){ id = 14; }
+    if (name == "search"){ id = 15; }
+    if (name == "code"){ id = 16; }
+    if (name == "save"){ id = 17; }
+    if (name == "sh"){ id = 18; }
+    if (name == "run"){ id = 19; }
+    if (name == "research"){ id = 20; }
     res[0] = id;
     res[1] = madTrim(arg);
     return res;

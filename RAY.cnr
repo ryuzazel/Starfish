@@ -6,11 +6,14 @@
 //   2 arquivista  - cuida do contexto/memória: grava lições, compacta, lista skills (7, 8, 12)
 //   3 ferreiro    - cria SKILLS novas a partir dos erros e padrões (ferramenta 10)
 //   4 planejador  - quebra um objetivo grande em um roteiro (ferramenta 11)
+//   5 pesquisador - busca e lê a web (ferramentas 14 web, 15 search)
+//   6 programador- escreve código (16 code = chamada ao modelo, 17 save = grava arquivo no sandbox)
+//   7 operador   - executa comandos e programas no sandbox (18 sh, 19 run)
 // O anel começa com 5 braços [executor, executor, revisor, arquivista, ferreiro]
 // e GANHA braços novos (planejador, 2º revisor, mais executores) ao evoluir.
 Sector Define{
     var tR = 5;                          // ticks até o braço morto ser substituído por um novo
-    var[] roleInit = {0,0,1,2,3};        // papéis do anel inicial (a "larva")
+    var[] roleInit = {0,0,1,2,3,5,6,7};  // papéis do anel inicial (a "larva"): 5 originais + pesquisador, programador, operador
 
     Struct Ray{
         var CurrentWork;
@@ -56,6 +59,9 @@ Sector Define{
         if (rl == 2){ var t2[] = {7,8,12}; return t2; }
         if (rl == 3){ var t3[] = {10}; return t3; }
         if (rl == 4){ var t4[] = {11}; return t4; }
+        if (rl == 5){ var t5[] = {14,15}; return t5; }
+        if (rl == 6){ var t6[] = {16,17}; return t6; }
+        if (rl == 7){ var t7[] = {18,19}; return t7; }
         return t;
     }
 
@@ -65,6 +71,9 @@ Sector Define{
         if (rl == 2){ return "arquivista"; }
         if (rl == 3){ return "ferreiro"; }
         if (rl == 4){ return "planejador"; }
+        if (rl == 5){ return "pesquisador"; }
+        if (rl == 6){ return "programador"; }
+        if (rl == 7){ return "operador"; }
         return "?";
     }
 
@@ -74,6 +83,9 @@ Sector Define{
         if (rl == 2){ return "A"; }
         if (rl == 3){ return "F"; }
         if (rl == 4){ return "P"; }
+        if (rl == 5){ return "W"; }
+        if (rl == 6){ return "C"; }
+        if (rl == 7){ return "O"; }
         return "?";
     }
 

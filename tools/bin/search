@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# helper do terminal do Starfish:  search "consulta"   (veja tools/search.py)
+exec python3 "$(dirname "$0")/../search.py" "$@"

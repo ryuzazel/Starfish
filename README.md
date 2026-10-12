@@ -4,7 +4,7 @@
 
 # Starfish
 
-**A local-first agent runtime with built-in review, memory and self-repair, written entirely in CnR.**
+**A local-first agent runtime with built-in review, memory and self-repair, with a CnR core, a real terminal and web research.**
 
 ![Language](https://img.shields.io/badge/language-CnR-ff7a45)
 ![Runtime](https://img.shields.io/badge/runtime-local%20GGUF-2ea043)
@@ -16,6 +16,7 @@
 ---
 
 ## Contents
+For Examples look at [EXAMPLES.md](EXAMPLES.md)
 
 - [Overview](#overview)
 - [Biological model](#biological-model)
@@ -28,6 +29,8 @@
 - [Progression](#progression)
 - [Arm lifecycle](#arm-lifecycle)
 - [Tools and task syntax](#tools-and-task-syntax)
+- [Terminal and research](#terminal-and-research)
+- [The tank (CLI)](#the-tank-cli)
 - [HTTP API](#http-api)
 - [Configuration](#configuration)
 - [Security model](#security-model)
@@ -54,8 +57,10 @@ The design is based on the anatomy and physiology of a sea star. Each module is 
 | Self-generated skills | Repeated errors are distilled into short reusable rules. Skills are scored by outcome and discarded if they do not help. |
 | Progression | Accumulated XP unlocks five levels that scale arm count, token budgets, step limits and context. |
 | Arm replacement | Arms that accumulate too much penalty are removed and replaced by a new arm that inherits from the best performers. |
-| Local and sandboxed | Runs a local GGUF model. File access is confined to one directory and HTTP is restricted to localhost. |
-| Single language | The entire agent is CnR. No glue scripts, no external orchestration framework. |
+| Real terminal | The operator arm runs any bash command in a persistent session (`cd` and `export` carry over). Python and Bash are the preferred languages for generated code. See [Terminal and research](#terminal-and-research). |
+| Web research | `search`, `web` and `research` tools with a multi-backend search chain (DuckDuckGo Lite/HTML, Mojeek, Bing, Wikipedia, or your own SearXNG). |
+| Local model | Runs a local GGUF model. File reads from the model's tools are confined to one directory; the terminal is a real shell (see [Security model](#security-model)). |
+| CnR core | The ring, arms, reviewer loop, scheduler, memory and HTTP server are CnR. Only the tools that touch the outside world (`tools/*.py`, `tools/*.sh`) are Python/Bash, and `starfish_tank.sh` is the CLI. |
 
 ---
 
@@ -359,6 +364,61 @@ Input is capped at 4,000 bytes and output at 60,000 bytes. A direct `ask:` can p
 
 ---
 
+## Terminal and research
+
+Three more arms extend the ring: the **researcher** (`web`, `search`), the **coder** (`code`, `save`) and the **operator** (`sh`, `run`).
+
+| Task | Description |
+|---|---|
+| `sh:<command>` | A **real bash terminal**. Pipes, `&&`, redirects, `curl`, `pip`, `git`, `python3 -c ...`. The working directory and exported variables persist between commands and between tasks. Starts in `starfish_workspace/Starfish_Work/`. Output always ends with `[cwd ...]` and `[exit N]`. |
+| `run:<file>` | Runs a file from the sandbox (`.py` and `.sh` preferred; `.js`, `.c`, `.cpp` also work). |
+| `code:<goal>` | The coder writes a program (Python 3 or Bash by default), the operator runs it, and any error goes back to the coder for a corrected retry. |
+| `search:<query>` | Numbered results (title, URL, snippet). |
+| `web:<url>` | Text of a public page. Private and loopback addresses are refused. |
+| `research:<question>` | Search, read the top pages, answer citing the URLs. |
+| `agent:<goal>` | The agent loop can use every tool above. It is told it has a real terminal and to prefer Bash and Python. |
+
+Inside the terminal, two helpers are on `PATH`: `search "query"` and `web https://page`. The agent can therefore research and process the results in the same command, for example `search "gguf quantization" | head -20`.
+
+**Search backends.** `tools/search.py` tries, in order: your SearXNG (if `STARFISH_SEARCH_URL` is set), DuckDuckGo Lite, DuckDuckGo HTML, Mojeek, Bing and the Wikipedia API. The first backend with results wins, and the footer line `[busca via X]` says which. If every backend fails, the error lists why (blocked, captcha, offline). Run `./starfish_tank.sh doctor` to see which backends work from your network, and `python3 tools/search.py --debug "query"` for details. For a stable setup, host SearXNG yourself:
+
+```bash
+docker run -d -p 8888:8080 searxng/searxng        # enable "json" under search.formats in settings.yml
+export STARFISH_SEARCH_URL='http://localhost:8888/search?format=json&q='
+```
+
+**Terminal settings** (environment variables, read by `tools/term.py`):
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `STARFISH_TERM_MODE` | `guarded` | `guarded` runs everything except a blocklist of catastrophic commands. `free` has no blocklist. `off` disables the terminal. |
+| `STARFISH_CMD_TIMEOUT` | `60` | Seconds per command. The whole process group is killed on timeout and the exit code is 124. |
+| `STARFISH_TERM_MAXOUT` | `20000` | Bytes returned. Longer output keeps the head and the tail. |
+| `STARFISH_SEARCH_LANG` | `pt` | Search language. |
+| `STARFISH_SEARCH_URL` | unset | Your SearXNG JSON endpoint. |
+
+Every command is appended to `starfish_workspace/term.log` (`./starfish_tank.sh audit` follows it live).
+
+---
+
+## The tank (CLI)
+
+`starfish_tank.sh` is the command-line front end. It needs only `bash`, `curl` and `python3`.
+
+```bash
+./starfish_tank.sh start            # start in the background (waits for the model)
+./starfish_tank.sh chat             # interactive: plain text goes to the agent
+./starfish_tank.sh agent "find the 3 largest files under /var/log and tell me why"
+./starfish_tank.sh code  "parse a csv and print the top 5 rows by price"
+./starfish_tank.sh research "what changed in llama.cpp this month?"
+./starfish_tank.sh term             # a shell that shares its session with the agent
+./starfish_tank.sh doctor           # checks CnR, model, terminal and every search backend
+```
+
+In `chat`, a line starting with `!` runs in the terminal immediately (`!ls -la`), `/sh`, `/code`, `/research`, `/search`, `/web`, `/ask`, `/gen`, `/mem` and `/skill` send the matching task, and `Ctrl+C` during a wait releases the task (it keeps running) and returns to the prompt. `term` and `!` use the same session file as the agent, so a `cd` you make is the directory the agent starts from next. `./starfish_tank.sh` with no arguments prints every command.
+
+---
+
 ## HTTP API
 
 | Method | Route | Description |
@@ -401,12 +461,14 @@ Small models are prone to repetition loops. Adding `--repeat-penalty 1.1 --dry-m
 ## Security model
 
 > [!WARNING]
-> Starfish has file and HTTP tools. Do not bind it to `0.0.0.0` without adding authentication.
+> Starfish now has a **real shell**. The model decides what to run, with the permissions of the user who started Starfish. Do not bind it to `0.0.0.0` without authentication, and prefer running it in a container, a VM or an unprivileged user.
 
-- The server binds to `127.0.0.1` only.
-- File reads are confined to `starfish_workspace/`. Paths containing `..` are rejected.
-- Writes only append to a notes file inside the workspace.
-- HTTP tools reach only `localhost` and `127.0.0.1`.
+- The HTTP server binds to `127.0.0.1` only.
+- The `read` tool is confined to `starfish_workspace/` (paths with `..` are rejected). `write` only appends to a notes file.
+- The `http` tool reaches only `localhost` and `127.0.0.1`. The `web` tool does the opposite: public internet only, with private, loopback and link-local addresses refused after DNS resolution, redirect by redirect.
+- The terminal (`sh`, `run`, `code`) runs inside **bubblewrap**: the only writable directory is `starfish_workspace/Starfish_Work/`. The rest of the disk (your `$HOME`, keys, other projects) is not visible; `/usr`, `/bin`, `/lib`, `/etc` are read-only; the environment is cleared; `HOME` is `Starfish_Work/`. Network stays open (`curl`, `pip`, `search`, `web`). If `bwrap` is missing the terminal **refuses to run** (fail closed). Install with `sudo pacman -S bubblewrap` (Arch) or `sudo apt install bubblewrap`; `STARFISH_JAIL=off` disables it.
+- On top of that, in `guarded` mode (default) the terminal refuses a short blocklist: `rm -rf /` and `~`, `mkfs`, `dd of=/dev/...`, fork bombs, `shutdown`/`reboot`, `curl | sh`, `sudo`/`su`, and a few others. This only reduces accidents; the isolation is the bubblewrap jail, not the regexes. `STARFISH_TERM_MODE=free` removes the blocklist and `off` removes the terminal.
+- Text read from the web is data, not instructions, and the prompts say so. `accShellAfterWeb` in `HEMALRING.cnr` is now `1`, so the agent may run commands after reading web pages, which is what makes search-then-act work and also what makes prompt injection a real risk. Set it to `0` to block `sh`, `run` and `code` in any task that has read the web.
 - Arms cannot run tools outside their role's worklist.
 
 ---
@@ -426,12 +488,22 @@ starfish/
 ├── ECOSSYSTEM.cnr        # long-term memory of lessons
 ├── SPECIFICITIES.cnr     # self-generated skill library
 ├── DARWINISM.cnr         # XP, levels, budgets
+├── starfish_tank.sh      # CLI: start, chat, term, doctor, ...
+├── tools/
+│   ├── term.py           #   real terminal (persistent session, audit log)
+│   ├── sandbox.sh        #   `sh` -> term.py, `run` -> sandbox files
+│   ├── search.py         #   multi-backend web search
+│   ├── web.py            #   page text
+│   └── bin/              #   `search` and `web` on the terminal's PATH
 ├── models/               # place .gguf files here
 ├── starfish_workspace/   # sandbox and persistent state (created at runtime)
 │   ├── context.txt       #   lessons
 │   ├── skills.txt        #   skills and scores
 │   ├── estado.txt        #   XP and level
-│   └── notes.txt         #   output of write:
+│   ├── notes.txt         #   output of write:
+│   ├── sandbox/          #   files written by the coder; terminal starts here
+│   ├── term.log          #   audit log of every terminal command
+│   └── .term_session.json#   terminal cwd and exported variables
 
 ```
 
@@ -439,7 +511,7 @@ starfish/
 
 ## Why CnR
 
-Starfish is written entirely in CnR. The ring, arms, reviewer loop, scheduler, memory, skill library, HTTP server and task queue are all CnR source.
+The core of Starfish is written in CnR: the ring, arms, reviewer loop, scheduler, memory, skill library, HTTP server and task queue are all CnR source.
 
 Language features used throughout the project:
 
@@ -448,6 +520,6 @@ Language features used throughout the project:
 - **Servers and threads**: the HTTP server and the worker thread are a few declarative lines.
 - **Local-model bridge**: the interpreter exposes the calls needed to start and query a local model.
 
-CnR has no standard string library, so `MADREPORITO.cnr` implements one in pure CnR.
+CnR has no standard string library, so `MADREPORITO.cnr` implements one in pure CnR. The few things CnR cannot do itself (HTTP to the public web, running a shell) are small Python and Bash scripts in `tools/`, called through `execCmd`.
 
 Running Starfish requires the CnR interpreter, a single C++17 source file (`CnR.cpp`) built with `-pthread`.

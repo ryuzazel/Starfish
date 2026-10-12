@@ -1,44 +1,51 @@
-//Ferramentas atuadoras de cada braço, é o MCP
-// ids de ferramenta:
-//   0 read, 1 write, 2 http, 3 echo, 4 ask (llama.cpp local)      -> executor
-//   6 gen   (uma PARTE de uma resposta longa)                    -> executor
-//   13 think (um passo do agente)                                -> executor
-//   9 review (conferir um trecho)                                -> revisor
-//   7 skill (listar/mostrar skills), 8 mem (contexto), 12 compact -> arquivista
-//   10 forge (criar skill)                                       -> ferreiro
-//   11 plan (roteiro de um objetivo grande)                      -> planejador
-// Sandbox: leitura/escrita só dentro de starfish_workspace/ (crie a pasta), HTTP só para localhost.
+// Actuator tools for each arm. This is the MCP.
+// tool ids:
+//   0 read, 1 write, 2 http, 3 echo, 4 ask (local llama.cpp)      -> executor
+//   6 gen   (ONE PART of a long answer)                           -> executor
+//   13 think (one agent step)                                     -> executor
+//   9 review (check an excerpt)                                   -> reviewer
+//   7 skill (list/show skills), 8 mem (context), 12 compact       -> archivist
+//   10 forge (create a skill)                                     -> skill creator
+//   11 plan (outline for a large goal)                            -> planner
+//   14 web (page text), 15 search (web search)                    -> researcher (execCmd -> tools/*.py)
+//   16 code (model writes a program), 17 save (file in sandbox)   -> coder
+//   18 sh (REAL terminal: any bash command, persistent cwd/env), 19 run (file in sandbox) -> operator
+//      (execCmd -> tools/sandbox.sh -> tools/term.py). Inside the terminal, `search` and `web` are on PATH.
+// Sandbox: read/write only inside starfish_workspace/ (create the folder), HTTP only to localhost.
 //
-// IA local via llama.cpp (builtins llamaStart/llamaConnect/llamaAsk do interpretador CnR):
-//   * Se existir o arquivo ambModelPath (um .gguf), o Starfish sobe o `llama-server` sozinho
-//     (binário: variável de ambiente LLAMA_SERVER_BIN, ou `llama-server` no PATH).
-//   * Senão, conecta em um llama-server já rodando em ambLlamaUrl
-//     (ou na URL da variável de ambiente LLAMA_SERVER_URL).
-//   * Se nada disso existir, o Starfish continua de pé; só as ferramentas de modelo falham.
+// Local AI via llama.cpp (CnR interpreter builtins llamaStart/llamaConnect/llamaAsk):
+//   * If the file ambModelPath (a .gguf) exists, Starfish starts `llama-server` by itself
+//     (binary: LLAMA_SERVER_BIN environment variable, or `llama-server` on PATH).
+//   * Otherwise, it connects to a llama-server that is already running at ambLlamaUrl
+//     (or at the URL in the LLAMA_SERVER_URL environment variable).
+//   * If neither exists, Starfish stays up; only the model tools fail.
 
 Gather(Bundle MADREPORITO){}
 Gather(Bundle CONTEXTO){}
 Gather(Bundle SKILLS){}
 
 var ambWorkspace = "starfish_workspace/";
-var ambModelPath = "models/model.gguf";   // coloque aqui o seu modelo GGUF
+var ambModelPath = "models/model.gguf";   // put your GGUF model here
 var ambLlamaPort = 8080;
-// Janela de contexto do modelo (tokens). ESTE NÚMERO MANDA em todos os orçamentos do Starfish:
-// tokens por parte, tamanho do contexto injetado, histórico do agente. Mantenha igual ao -c abaixo.
-// Mais memória/GPU? suba (ex.: 32768 e "-c 32768 -ngl 99"). Pouca memória? desça (ex.: 8192).
+// Model context window (tokens). THIS NUMBER DRIVES every Starfish budget:
+// tokens per part, injected context size, agent history. Keep it equal to -c below.
+// More memory/GPU? Raise it (e.g. 32768 and "-c 32768 -ngl 99"). Low memory? Lower it (e.g. 8192).
 var ambCtxTokens = 16384;
-var ambLlamaArgs = "-c 16384";            // flags extras do llama-server (ex.: "-c 16384 -ngl 99")
+var ambLlamaArgs = "-c 16384";            // extra llama-server flags (e.g. "-c 16384 -ngl 99")
 var ambLlamaUrl = "http://127.0.0.1:8080";
-var ambLlamaMaxTokens = 2048;             // `ask:` direto (era 512)
-var ambSegTokens = 1024;                  // tokens de uma parte do `gen:`; o ACC ajusta pelo nível
+var ambLlamaMaxTokens = 2048;             // direct `ask:` (was 512)
+var ambShellEnabled = 1;                  // 0 turns OFF sh/run/save/code (arms stop executing anything)
+var ambCmdTimeout = 130;                  // seconds execCmd waits (term.py and sandbox.sh run have their own, shorter, STARFISH_CMD_TIMEOUT = 60)
+var ambSegTokens = 1024;                  // tokens for one `gen:` part; the CCR adjusts it by level
 
-var ambLlamaSystem = "Voce e o cerebro de um agente chamado Starfish. Responda com precisao e completude; seja breve apenas quando a pergunta for simples.";
-var ambSysAgente = "[AGENTE] Voce e o agente Starfish. Decida a proxima acao. Responda sempre com UMA linha de decisao: 'TOOL ferramenta:argumento' ou 'FINAL resposta completa'.";
-var ambSysGerador = "[GERADOR] Voce e o braco EXECUTOR do Starfish e escreve respostas longas e tecnicamente corretas, em partes. Regras: (1) escreva SOMENTE o texto da parte pedida, sem comentar o que esta fazendo; (2) continue exatamente de onde o texto anterior parou, sem repetir nem recomecar; (3) siga o ROTEIRO, as REGRAS e as CORRECOES recebidas; (4) so afirme o que voce tem razao para considerar verdadeiro e confira numeros e codigo; (5) quando o texto estiver COMPLETO, termine com a marca [FIM] em uma linha final; nao escreva [FIM] antes disso.";
-var ambSysRevisor = "[REVISOR] Voce e o braco REVISOR do Starfish e confere o TRECHO contra o OBJETIVO. Procure: afirmacoes falsas ou inventadas (fatos, definicoes, termos tecnicos, anatomia, datas, numeros), contradicoes, contas erradas, codigo que nao funciona, e desrespeito as REGRAS. Procedimento: (1) em ate 4 frases curtas, aponte as afirmacoes mais arriscadas do trecho e diga se cada uma esta correta; (2) termine com UMA ultima linha: 'VEREDITO: OK' ou 'VEREDITO: ERRO <gravidade 1-3> | <o que esta errado> | <como corrigir>'. Gravidade 1 = leve, 2 = relevante, 3 = grave (inventado ou inutilizavel). Seja criterioso: se voce sabe que uma afirmacao esta errada, e ERRO. Trecho cortado no meio de uma frase NAO e erro. Sem erro que voce consiga apontar, VEREDITO: OK.";
-var ambSysPlanejador = "[PLANEJADOR] Voce e o braco PLANEJADOR do Starfish. Para o OBJETIVO dado, liste de 3 a 8 topicos numerados na ordem em que devem ser escritos, um por linha, sem explicacoes.";
-var ambSysFerreiro = "[FERREIRO] Voce e o braco FERREIRO do Starfish e cria SKILLS: regras curtas e reutilizaveis que evitam erros repetidos. Responda SOMENTE com uma linha no formato: nome-curto-em-minusculas | instrucao imperativa de ate 300 caracteres.";
-var ambSysArquivista = "[ARQUIVISTA] Voce e o braco ARQUIVISTA do Starfish. Condense as LICOES recebidas mantendo as regras mais importantes e removendo duplicatas. Responda com uma licao por linha, sem numeracao e sem comentarios.";
+var ambLlamaSystem = "You are the brain of an agent called Starfish. Answer accurately and completely; be brief only when the question is simple.";
+var ambSysAgente = "[AGENT] You are the Starfish agent. Decide the next action. Always answer with ONE decision line: 'TOOL tool:argument' or 'FINAL complete answer'.";
+var ambSysGerador = "[EXECUTOR] You are the EXECUTOR arm of Starfish and you write long, technically correct answers in parts. Rules: (1) write ONLY the text of the requested part, without commenting on what you are doing; (2) continue exactly where the previous text stopped, without repeating or restarting; (3) follow the OUTLINE, the RULES and the CORRECTIONS you receive; (4) only state what you have reason to believe is true, and double-check numbers and code; (5) when the text is COMPLETE, end with the mark [END] on a final line; do not write [END] before that.";
+var ambSysRevisor = "[REVIEWER] You are the REVIEWER arm of Starfish and you check the EXCERPT against the GOAL. Look for: false or invented claims (facts, definitions, technical terms, anatomy, dates, numbers), contradictions, wrong calculations, code that does not work, and violations of the RULES. Procedure: (1) in up to 4 short sentences, point out the riskiest claims in the excerpt and say whether each one is correct; (2) finish with ONE last line: 'VERDICT: OK' or 'VERDICT: ERROR <severity 1-3> | <what is wrong> | <how to fix it>'. Severity 1 = minor, 2 = relevant, 3 = severe (invented or unusable). Be rigorous: if you know a claim is wrong, it is an ERROR. An excerpt cut off mid-sentence is NOT an error. If there is no error you can point to, VERDICT: OK.";
+var ambSysProgramador = "[CODER] You are the CODER arm of Starfish. Write ONE complete, runnable program for the GOAL. Prefer Python 3 (standard library only); use Bash for small shell tasks; use .js, .c or .cpp only if the GOAL asks for that language. Answer in exactly this format and nothing else: first line 'FILE: name.ext' (ext is .py or .sh by default; the name uses only letters, digits, underscore and dash), then ONE fenced code block with the whole program. The program takes no input, prints its result to stdout and finishes in under 30 seconds. It uses the network only if the GOAL needs it (bash programs have the commands search and web on PATH). If you receive an ERROR from a previous attempt, fix its cause and answer again in the same format.";
+var ambSysPlanejador = "[PLANNER] You are the PLANNER arm of Starfish. For the given GOAL, list 3 to 8 numbered topics in the order they should be written, one per line, with no explanations.";
+var ambSysFerreiro = "[SKILL CREATOR] You are the SKILL CREATOR arm of Starfish and you create SKILLS: short, reusable rules that prevent repeated mistakes. Answer ONLY with one line in the format: short-name-in-lowercase | imperative instruction of up to 300 characters.";
+var ambSysArquivista = "[ARCHIVIST] You are the ARCHIVIST arm of Starfish. Condense the LESSONS you receive, keeping the most important rules and removing duplicates. Answer with one lesson per line, with no numbering and no comments.";
 
 function ambStartsWith(var s, var prefix){
     var a = stringToChars(s);
@@ -64,18 +71,46 @@ function ambHasDots(var s){
     return 0;
 }
 
-// ids das ferramentas "de mão" (o que um executor sabe operar no começo)
+// returns 1 if the string contains the given character code
+function ambHasChar(var s, var code){
+    var c = stringToChars(s);
+    for(var i = 0; i < len(c); i++){
+        if (c[i] == code){
+            return 1;
+        }
+    }
+    return 0;
+}
+
+// returns 1 only if the URL host is EXACTLY the given prefix (not "localhost.evil.com")
+function ambUrlHasHost(var url, var prefix){
+    if (ambStartsWith(url, prefix) == 0){
+        return 0;
+    }
+    var u = stringToChars(url);
+    var n = len(stringToChars(prefix));
+    if (len(u) == n){
+        return 1;
+    }
+    // the host must end here: ':' (58), '/' (47) or '?' (63)
+    if (u[n] == 58 || u[n] == 47 || u[n] == 63){
+        return 1;
+    }
+    return 0;
+}
+
+// ids of the "hand" tools (what an executor knows how to operate at the start)
 function ambToolList(){
     var t[] = {0,1,2,3,4,6,13};
     return t;
 }
 
-// janela de contexto (tokens) configurada: base dos orçamentos do ACC
+// configured context window (tokens): base for the CCR budgets
 function ambCtx(){
     return ambCtxTokens;
 }
 
-// o ACC ajusta quantos tokens uma parte do `gen:` pode ter (cresce com o nível)
+// the CCR adjusts how many tokens one `gen:` part may use (grows with the level)
 function ambSetTokens(var n){
     var v = n;
     if (v < 64){ v = 64; }
@@ -85,29 +120,33 @@ function ambSetTokens(var n){
 
 function ambRead(var arg){
     if (ambHasDots(arg) == 1){
-        Throw("caminho invalido");
+        Throw("invalid path");
     }
     var path = ambWorkspace + arg;
     if (fileExists(path)){
         return readFile(path);
     }
-    Throw("arquivo inexistente: " + arg);
+    Throw("file not found: " + arg);
 }
 
 function ambWrite(var arg){
     appendFile(ambWorkspace + "notes.txt", arg + "\n");
-    return "anotado";
+    return "noted";
 }
 
 function ambHttp(var arg){
-    if (ambStartsWith(arg, "http://localhost") == 0 && ambStartsWith(arg, "http://127.0.0.1") == 0){
-        Throw("host nao permitido");
+    // '@' (64) is rejected to block tricks like http://localhost:80@evil.com
+    if (ambHasChar(arg, 64) == 1){
+        Throw("host not allowed");
+    }
+    if (ambUrlHasHost(arg, "http://localhost") == 0 && ambUrlHasHost(arg, "http://127.0.0.1") == 0){
+        Throw("host not allowed");
     }
     var r = Http.GET(arg);
     return "status " + r.status + ": " + (string)r.body;
 }
 
-// modelos Qwen3 podem devolver o raciocínio em <think>...</think>; descarta tudo até o </think>
+// Qwen3 models may return their reasoning inside <think>...</think>; drops everything up to </think>
 function ambStripThink(var s){
     var c = stringToChars(s);
     var tag = stringToChars("</think>");
@@ -139,32 +178,134 @@ function ambStripThink(var s){
     return charsToString(rest);
 }
 
-// sobe/conecta o llama.cpp. Retorna uma mensagem de status (não derruba o Starfish se falhar).
+// ---- tools that reach outside (researcher / coder / operator arms) -----------------------------
+// The model's text NEVER goes on a command line: it is written to starfish_workspace/tool_arg.txt
+// and the scripts in tools/ read it from there. Scripts report failure with a first line "ERROR: ...".
+
+function ambWriteArg(var text){
+    writeFile(ambWorkspace + "tool_arg.txt", text);
+}
+
+// result of a script: "ERROR: ..." becomes a failure (the arm is penalized), anything else is the result
+function ambToolOut(var raw){
+    var s = (string)raw;
+    if (MADREPORITO.madStarts(MADREPORITO.madTrim(s), "ERROR") == 1){
+        Throw(MADREPORITO.madTrim(s));
+    }
+    return s;
+}
+
+function ambShellGuard(){
+    if (ambShellEnabled == 0){
+        Throw("execution tools are disabled (ambShellEnabled = 0)");
+    }
+}
+
+function ambWeb(var arg){
+    ambWriteArg(arg);
+    return ambToolOut(execCmd("python3 tools/web.py", ambCmdTimeout));
+}
+
+function ambSearch(var arg){
+    ambWriteArg(arg);
+    return ambToolOut(execCmd("python3 tools/search.py", ambCmdTimeout));
+}
+
+// file name allowed in the sandbox: letters, digits, _ - . (not starting with . or -), known extension
+function ambSafeName(var name){
+    var c = stringToChars(name);
+    if (len(c) < 3 || len(c) > 60){
+        return 0;
+    }
+    for(var i = 0; i < len(c); i++){
+        var ch = c[i];
+        var ok = 0;
+        if (ch >= 48 && ch <= 57){ ok = 1; }
+        if (ch >= 65 && ch <= 90){ ok = 1; }
+        if (ch >= 97 && ch <= 122){ ok = 1; }
+        if (ch == 95 || ch == 45 || ch == 46){ ok = 1; }
+        if (ok == 0){ return 0; }
+    }
+    if (c[0] == 46 || c[0] == 45){
+        return 0;
+    }
+    if (ambHasDots(name) == 1){
+        return 0;
+    }
+    var okExt = 0;
+    var exts[] = {".py", ".js", ".sh", ".c", ".cpp", ".txt", ".md", ".json"};
+    for(var e = 0; e < len(exts); e++){
+        var x = stringToChars(exts[e]);
+        if (len(c) > len(x)){
+            var same = 1;
+            for(var k = 0; k < len(x); k++){
+                if (c[len(c) - len(x) + k] != x[k]){
+                    same = 0;
+                }
+            }
+            if (same == 1){ okExt = 1; }
+        }
+    }
+    return okExt;
+}
+
+// save:name.ext|content  -> writes starfish_workspace/Starfish_Work/name.ext (the first '|' separates name and content)
+function ambSave(var arg){
+    ambShellGuard();
+    var bar = MADREPORITO.madIndexOf(arg, "|", 0);
+    if (bar == -1){
+        Throw("usage: save:name.ext|content");
+    }
+    var name = MADREPORITO.madTrim(MADREPORITO.madSub(arg, 0, bar));
+    var content = MADREPORITO.madSub(arg, bar + 1, len(stringToChars(arg)));
+    if (ambSafeName(name) == 0){
+        Throw("invalid file name '" + name + "' (letters, digits, _ - . ; extensions: .py .js .sh .c .cpp .txt .md .json)");
+    }
+    execCmd("bash tools/sandbox.sh init", 5);   // makes sure starfish_workspace/Starfish_Work/ exists
+    writeFile(ambWorkspace + "Starfish_Work/" + name, content);
+    return "saved " + name + " (" + len(stringToChars(content)) + " bytes)";
+}
+
+// sh:command  -> one allowlisted command, no shell interpretation (see tools/sandbox.sh)
+function ambSh(var arg){
+    ambShellGuard();
+    ambWriteArg(arg);
+    return ambToolOut(execCmd("bash tools/sandbox.sh sh", ambCmdTimeout));
+}
+
+// run:file  -> runs a file from the sandbox (.py .js .sh .c .cpp); the output ends with [exit N]
+function ambRunFile(var arg){
+    ambShellGuard();
+    ambWriteArg(arg);
+    return ambToolOut(execCmd("bash tools/sandbox.sh run", ambCmdTimeout));
+}
+
+// starts/connects llama.cpp. Returns a status message (never takes Starfish down if it fails).
 function ambBoot(){
     try {
         if (fileExists(ambModelPath)){
             llamaStart(ambModelPath, ambLlamaPort, ambLlamaArgs, 300);
-            return "llama.cpp: modelo " + ambModelPath + " carregado na porta " + ambLlamaPort + " (contexto " + ambCtxTokens + " tokens)";
+            return "llama.cpp: model " + ambModelPath + " loaded on port " + ambLlamaPort + " (context " + ambCtxTokens + " tokens)";
         }
         llamaConnect(ambLlamaUrl);
-        return "llama.cpp: usando llama-server em " + ambLlamaUrl + " (contexto assumido: " + ambCtxTokens + " tokens)";
+        return "llama.cpp: using llama-server at " + ambLlamaUrl + " (assumed context: " + ambCtxTokens + " tokens)";
     } catch(var e) {
-        return "llama.cpp INDISPONIVEL (ferramentas de modelo vao falhar): " + e;
+        return "llama.cpp UNAVAILABLE (model tools will fail): " + e;
     }
 }
 
-// chamada ao modelo com um prompt de sistema de papel. O raciocínio <think>...</think> é descartado.
+// model call with a role system prompt. The <think>...</think> reasoning is discarded.
 function ambModel(var prompt, var system, var maxTokens, var temp){
     var txt = llamaAsk(prompt, system, maxTokens, temp);
     return ambStripThink((string)txt);
 }
 
-// pergunta direta ao modelo local (ferramenta `ask:`)
+// direct question to the local model (`ask:` tool)
 function ambAsk(var prompt){
     return ambModel(prompt, ambLlamaSystem, ambLlamaMaxTokens, 0.3);
 }
 
-// ferramenta 7: skill:list | skill:show nome
+// tool 7: skill:list | skill:show name
 function ambSkillTool(var arg){
     var a = MADREPORITO.madTrim(arg);
     if (a == "" || a == "list"){
@@ -174,46 +315,46 @@ function ambSkillTool(var arg){
         var nm = MADREPORITO.madTrimFrom(a, 4);
         var s = SKILLS.skShow(nm);
         if (s == ""){
-            Throw("skill inexistente: " + nm);
+            Throw("skill not found: " + nm);
         }
         return s;
     }
-    Throw("uso: skill:list | skill:show nome");
+    Throw("usage: skill:list | skill:show name");
 }
 
-// ferramenta 8: mem:list | mem:add lição | mem:find palavra | mem:count
+// tool 8: mem:list | mem:add lesson | mem:learn lesson | mem:find word | mem:count
 function ambMemTool(var arg){
     var a = MADREPORITO.madTrim(arg);
     if (a == "" || a == "list"){
         return CONTEXTO.ctxDump(40);
     }
     if (a == "count"){
-        return "" + CONTEXTO.ctxCount() + " licoes, " + CONTEXTO.ctxSize() + " caracteres";
+        return "" + CONTEXTO.ctxCount() + " lessons, " + CONTEXTO.ctxSize() + " characters";
     }
     if (MADREPORITO.madStarts(a, "learn") == 1){
-        // lição gerada pelo próprio Starfish (revisor -> arquivista), sem a marca [manual]
+        // lesson generated by Starfish itself (reviewer -> archivist), without the [manual] mark
         var auto = MADREPORITO.madTrimFrom(a, 5);
         if (auto == ""){
-            Throw("mem:learn precisa de um texto");
+            Throw("mem:learn needs some text");
         }
         if (CONTEXTO.ctxAdd(auto) == 0){
-            return "licao ja existia";
+            return "lesson already existed";
         }
-        return "licao gravada";
+        return "lesson saved";
     }
     if (MADREPORITO.madStarts(a, "add") == 1){
         var lesson = MADREPORITO.madTrimFrom(a, 3);
         if (lesson == ""){
-            Throw("mem:add precisa de um texto");
+            Throw("mem:add needs some text");
         }
         CONTEXTO.ctxAdd("[manual] " + lesson);
-        return "licao gravada";
+        return "lesson saved";
     }
     if (MADREPORITO.madStarts(a, "find") == 1){
         var q = MADREPORITO.madTrimFrom(a, 4);
         return CONTEXTO.ctxRecall(4000, q);
     }
-    Throw("uso: mem:list | mem:add licao | mem:find palavra | mem:count");
+    Throw("usage: mem:list | mem:add lesson | mem:learn lesson | mem:find word | mem:count");
 }
 
 function ambRun(var id, var arg){
@@ -230,7 +371,13 @@ function ambRun(var id, var arg){
     if (id == 11){ return ambModel(arg, ambSysPlanejador, 500, 0.3); }
     if (id == 12){ return ambModel(arg, ambSysArquivista, 1500, 0.2); }
     if (id == 13){ return ambModel(arg, ambSysAgente, ambLlamaMaxTokens, 0.2); }
-    Throw("ferramenta desconhecida: " + id);
+    if (id == 14){ return ambWeb(arg); }
+    if (id == 15){ return ambSearch(arg); }
+    if (id == 16){ ambShellGuard(); return ambModel(arg, ambSysProgramador, ambLlamaMaxTokens, 0.2); }
+    if (id == 17){ return ambSave(arg); }
+    if (id == 18){ return ambSh(arg); }
+    if (id == 19){ return ambRunFile(arg); }
+    Throw("unknown tool: " + id);
 }
 
 Bundle AMBULACRO{

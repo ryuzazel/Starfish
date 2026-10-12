@@ -1,1 +1,8 @@
 models/model.gguf
+.starfish.pid
+.tank_history
+starfish.out
+starfish_workspace/.term_session.json
+starfish_workspace/term.log
+starfish_workspace/tool_arg.txt
+__pycache__/

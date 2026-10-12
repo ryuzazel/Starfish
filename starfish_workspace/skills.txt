@@ -1,0 +1,5 @@
+rich-lexicon|1.21|7|Expand your vocabulary with new, accurate terms, avoiding repetitions.
+code-like-an-expert|1.09|3|consistently review and refactor your code to improve readability and efficiency.
+verify-claims|1.09|3|Always verify facts and definitions before stating them.
+check-math|1.09|3|Solve step by step and verify every result by substituting it back or recomputing it another way. Never guess numbers; state units and assumptions. If a result could not be verified, say it is an estimate.
+cpp-int-overflow|1.03|1|In C++, before multiplying ints that can exceed 46340, cast to double or long long (static_cast<double>(n) * n).
